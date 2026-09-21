@@ -4,6 +4,7 @@ final class ThreadStatusStore {
     var onChange: ((AggregatePetStatus) -> Void)?
 
     private var statuses: [String: ThreadPetStatus] = [:]
+    private var titles: [String: String] = [:]
     private var transientGeneration: [String: UUID] = [:]
     private var activityGeneration: [String: UUID] = [:]
     private var connected = false
@@ -14,6 +15,7 @@ final class ThreadStatusStore {
         connected = value
         if !value {
             statuses.removeAll()
+            titles.removeAll()
             transientGeneration.removeAll()
             activityGeneration.removeAll()
             initialScanComplete = false
@@ -30,8 +32,27 @@ final class ThreadStatusStore {
     func removeThread(_ threadId: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         statuses.removeValue(forKey: threadId)
+        titles.removeValue(forKey: threadId)
         transientGeneration.removeValue(forKey: threadId)
         activityGeneration.removeValue(forKey: threadId)
+        publish()
+    }
+
+    func updateTitle(threadId: String, title: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty else { return }
+        titles[threadId] = normalizedTitle
+        guard let current = statuses[threadId], current.title != normalizedTitle else {
+            return
+        }
+        statuses[threadId] = ThreadPetStatus(
+            threadId: current.threadId,
+            state: current.state,
+            updatedAt: current.updatedAt,
+            title: normalizedTitle,
+            startedAt: current.startedAt
+        )
         publish()
     }
 
@@ -117,10 +138,24 @@ final class ThreadStatusStore {
     }
 
     private func setState(_ state: PetState, threadId: String) {
+        let previous = statuses[threadId]
+        let startedAt: Date?
+        if case .working = state {
+            if let previous,
+               case .working = previous.state {
+                startedAt = previous.startedAt ?? previous.updatedAt
+            } else {
+                startedAt = Date()
+            }
+        } else {
+            startedAt = nil
+        }
         statuses[threadId] = ThreadPetStatus(
             threadId: threadId,
             state: state,
-            updatedAt: Date()
+            updatedAt: Date(),
+            title: previous?.title ?? titles[threadId] ?? "",
+            startedAt: startedAt
         )
         publish()
     }

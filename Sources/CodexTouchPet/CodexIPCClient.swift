@@ -312,7 +312,13 @@ final class CodexIPCClient {
     private func scheduleCandidateScan(generation: UUID, after delay: TimeInterval) {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isCurrentSession(generation) else { return }
-            let threadIds = self.threadProvider.recentThreadIDs(limit: 20)
+            let recentThreads = self.threadProvider.recentThreads(limit: 20)
+            let threadIds = recentThreads.map(\.id)
+            for thread in recentThreads {
+                DispatchQueue.main.async { [weak self] in
+                    self?.statusStore.updateTitle(threadId: thread.id, title: thread.title)
+                }
+            }
             self.probeOwners(threadIds)
             DispatchQueue.main.async { [weak self] in
                 self?.statusStore.finishInitialScan()

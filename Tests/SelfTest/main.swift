@@ -76,6 +76,12 @@ expect(error.state == .systemError, "System error must have highest priority")
 
 let workingLabel = PetState.working(.tool).label
 expect(workingLabel == "Codex 正在工作", "Activity detail must not replace the primary working state")
+expect(!PetState.idle.color.isEqual(PetState.working(nil).color), "Idle and working must use different visual colors")
+expect(!PetState.disconnected.color.isEqual(PetState.connecting.color), "Disconnected and connecting must use different visual colors")
+expect(!PetState.interrupted.color.isEqual(PetState.failed.color), "Stopped and failed must use different visual colors")
+expect(PetState.idle.compactBackgroundColor.alphaComponent == 0, "Idle compact background must be transparent")
+expect(PetState.working(nil).compactBackgroundColor.alphaComponent > 0, "Working compact background must be colored")
+expect(!PetState.disconnected.compactBackgroundColor.isEqual(PetState.connecting.compactBackgroundColor), "Compact backgrounds must distinguish disconnected and connecting")
 
 let ordered = PetStatusAggregator.aggregate(
     [

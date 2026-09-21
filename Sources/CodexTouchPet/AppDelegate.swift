@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var quietMenuItem: NSMenuItem?
+    private var settingsWindowController: SettingsWindowController?
     private var signalSources: [DispatchSourceSignal] = []
     private var workspaceObservers: [NSObjectProtocol] = []
 
@@ -42,6 +43,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusMenuItem = NSMenuItem(title: "状态：正在连接", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
+
+        let settingsItem = NSMenuItem(
+            title: "设置…",
+            action: #selector(showSettings),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
+        let usageItem = NSMenuItem(
+            title: "使用说明",
+            action: #selector(showUsage),
+            keyEquivalent: ""
+        )
+        usageItem.target = self
+        menu.addItem(usageItem)
+
+        let aboutItem = NSMenuItem(
+            title: "关于 Codex Touch Pet",
+            action: #selector(showAbout),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
+        let versionItem = NSMenuItem(title: "版本 \(AppMetadata.version)（\(AppMetadata.build)）", action: nil, keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        menu.addItem(.separator())
 
         let showItem = NSMenuItem(
             title: "在 Touch Bar 展开",
@@ -136,6 +166,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showTouchBar() {
         touchBarController.showExpanded()
+    }
+
+    @objc private func showSettings() {
+        if settingsWindowController == nil {
+            settingsWindowController = SettingsWindowController(
+                quietMode: touchBarController.quietMode
+            ) { [weak self] enabled in
+                guard let self else { return }
+                self.touchBarController.setQuietMode(enabled)
+                self.quietMenuItem?.state = enabled ? .on : .off
+            }
+        }
+        settingsWindowController?.present()
+    }
+
+    @objc private func showUsage() {
+        let alert = NSAlert()
+        alert.messageText = "Codex Touch Pet 使用说明"
+        alert.informativeText = "Touch Bar 只显示汇总：狐狸表示当前状态，右侧显示活动任务数量、当前任务缩略名和运行时间。切回 Codex 会自动展开完整面板，具体任务详情仍回到 Codex 查看。\n\n菜单栏可打开设置、切换安静模式，并查看当前连接状态。"
+        alert.addButton(withTitle: "完成")
+        alert.runModal()
+    }
+
+    @objc private func showAbout() {
+        let alert = NSAlert()
+        alert.messageText = "\(AppMetadata.name) \(AppMetadata.version)"
+        alert.informativeText = "一个面向实体 MacBook Touch Bar 的 Codex 状态宠物。\n\n开源说明：源码仓库位于 GitHub。当前许可证仍待项目所有者确认，在明确许可证前，请勿将本项目视为授予复制、修改或分发许可。\n\n本项目依赖 macOS AppKit、Codex Desktop 本地状态与 Touch Bar 私有接口，兼容性以实际设备为准。"
+        alert.addButton(withTitle: "打开源代码")
+        alert.addButton(withTitle: "完成")
+        if alert.runModal() == .alertFirstButtonReturn {
+            NSWorkspace.shared.open(AppMetadata.repositoryURL)
+        }
     }
 
     @objc private func toggleQuietMode() {

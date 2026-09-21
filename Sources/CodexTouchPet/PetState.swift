@@ -83,11 +83,21 @@ enum PetState: Equatable {
 
     var color: NSColor {
         switch self {
-        case .disconnected, .interrupted:
+        case .disconnected:
+            // A disconnected client is not an error in the current task. Use a
+            // muted indigo so it is distinct from both a stopped task and a
+            // transient connection attempt.
+            return NSColor(calibratedRed: 0.58, green: 0.50, blue: 0.74, alpha: 1)
+        case .interrupted:
             return .secondaryLabelColor
         case .connecting:
-            return NSColor(calibratedRed: 0.48, green: 0.62, blue: 0.72, alpha: 1)
-        case .idle, .working:
+            // Amber communicates "in progress" without borrowing the red
+            // reserved for an actual failure.
+            return NSColor(calibratedRed: 0.95, green: 0.70, blue: 0.24, alpha: 1)
+        case .idle:
+            // Idle is intentionally neutral; blue is reserved for active work.
+            return .labelColor
+        case .working:
             return NSColor(calibratedRed: 0.30, green: 0.86, blue: 1.00, alpha: 1)
         case .waitingApproval, .waitingInput:
             return .systemOrange
@@ -98,12 +108,45 @@ enum PetState: Equatable {
         }
     }
 
+    /// Background color for the compact Control Strip entry. The approved fox
+    /// artwork stays full-color; only its surrounding button communicates the
+    /// semantic state color.
+    var compactBackgroundColor: NSColor {
+        switch self {
+        case .idle:
+            return .clear
+        case .working:
+            return NSColor(calibratedRed: 0.08, green: 0.52, blue: 0.66, alpha: 0.72)
+        case .connecting:
+            return NSColor(calibratedRed: 0.63, green: 0.40, blue: 0.05, alpha: 0.72)
+        case .disconnected:
+            return NSColor(calibratedRed: 0.35, green: 0.27, blue: 0.52, alpha: 0.72)
+        case .waitingApproval, .waitingInput:
+            return NSColor(calibratedRed: 0.70, green: 0.35, blue: 0.04, alpha: 0.72)
+        case .completed:
+            return NSColor(calibratedRed: 0.08, green: 0.48, blue: 0.24, alpha: 0.72)
+        case .interrupted:
+            return NSColor(calibratedWhite: 0.28, alpha: 0.72)
+        case .failed, .systemError:
+            return NSColor(calibratedRed: 0.65, green: 0.10, blue: 0.12, alpha: 0.78)
+        }
+    }
+
 }
 
 struct ThreadPetStatus: Equatable {
     let threadId: String
     var state: PetState
     var updatedAt: Date
+    var title: String = ""
+    var startedAt: Date? = nil
+
+    var displayTitle: String {
+        let normalized = title
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? "当前任务" : normalized
+    }
 }
 
 typealias PetTaskStatus = ThreadPetStatus

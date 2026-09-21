@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Codex Touch Pet · 手工像素候选</title>
+<style>
+:root{color-scheme:dark;--bg:#0f1115;--panel:#181c23;--line:#343b47;--muted:#a2acbb;--text:#f3f5f8;--blue:#36c8f4;--amber:#f1b34e;--green:#47d889;--red:#ff5967;--gray:#929baa}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#202738 0,var(--bg) 45%);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}main{width:min(1240px,calc(100% - 32px));margin:32px auto 72px}h1{font-size:25px;letter-spacing:-.025em;margin:0 0 8px}h2{font-size:18px;margin:28px 0 12px}p{color:var(--muted);max-width:900px}.banner{border:1px solid #515c6e;background:#1d2532;border-radius:12px;padding:13px 15px;margin:18px 0;color:#d9e2ef}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:18px 0}button{appearance:none;border:1px solid #4a5463;border-radius:9px;padding:8px 12px;background:#252c37;color:var(--text);font:inherit;cursor:pointer}button:hover,button[aria-pressed=true]{background:#303b4b;border-color:#8794a7}label{color:var(--muted)}select{margin-left:6px;background:#252c37;color:var(--text);border:1px solid #4a5463;border-radius:7px;padding:6px 8px}.candidate-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.candidate{background:rgba(24,28,35,.94);border:1px solid var(--line);border-radius:15px;padding:16px;min-width:0}.candidate h3{margin:0;font-size:17px}.candidate .description{color:var(--muted);min-height:43px;margin:4px 0 14px}.state-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.state-card{background:#0b0d11;border:1px solid #2c333f;border-radius:10px;padding:8px;text-align:center}.state-name{font-size:12px;color:#c7cfdb;margin-top:6px;min-height:36px}.pixel{width:64px;height:64px;display:block;margin:auto;image-rendering:pixelated;image-rendering:crisp-edges}.grayscale .pixel{filter:grayscale(1)}.preview-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}.preview{background:#090b0e;border:1px solid #3a4350;border-radius:13px;padding:13px}.preview-label{font-size:12px;color:var(--muted);margin-bottom:9px}.touchbar{height:66px;border:1px solid #3e4653;border-radius:10px;background:#020304;display:flex;align-items:center;gap:13px;padding:10px 15px}.compact{justify-content:center}.pet-slot{width:43px;height:43px;border-radius:8px;background:#161a21;display:grid;place-items:center}.pet-slot .pixel{width:32px;height:32px}.status{font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.secondary{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px;color:var(--muted);font-size:12px}.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}.notes{margin:0;padding-left:20px;color:#c7cfdb;line-height:1.8}.notes li{margin:3px 0}.state-card[data-state="systemError"]{border-color:#5b3037}.state-card[data-state="waitingApproval"],.state-card[data-state="waitingInput"]{border-color:#5b4a2e}@media(max-width:900px){.candidate-grid{grid-template-columns:1fr}.preview-grid{grid-template-columns:1fr}}@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+</head>
+<body>
+<main id="app">
+<h1>Codex Touch Pet · 手工像素候选</h1>
+<p>这是正式开发前的视觉确认板。A、B、C 都是手工绘制的测试代号，不是已批准角色。先比较轮廓、姿态和 Touch Bar 小尺寸，再决定是否进入第一轮识别测试。</p>
+<div class="banner"><strong>当前门禁：</strong>候选只在 <code>design-test/</code> 内展示，不接入正式应用。红色只给“当前系统异常”；工作主状态仍是“Codex 正在工作”；多任务只显示汇总。</div>
+<div class="toolbar"><button id="gray" aria-pressed="false">切换去色预览</button><label>Touch Bar 尺寸<select id="scale"><option value="24">24 px</option><option value="32" selected>32 px</option></select></label><button id="next">切换预览状态</button></div>
+<section><h2>三种候选方向 · 九种核心状态</h2><div id="candidates" class="candidate-grid"></div><div class="legend"><span><i class="dot" style="background:var(--blue)"></i>工作</span><span><i class="dot" style="background:var(--amber)"></i>等待用户</span><span><i class="dot" style="background:var(--green)"></i>完成</span><span><i class="dot" style="background:var(--red)"></i>当前严重错误</span><span><i class="dot" style="background:var(--gray)"></i>中性/连接状态</span></div></section>
+<section><h2>Touch Bar 小尺寸预览</h2><div class="preview-grid"><div class="preview"><div class="preview-label">其他应用前台 · 窄宠物入口</div><div id="compact" class="touchbar compact"></div></div><div class="preview"><div class="preview-label">ChatGPT/Codex 前台 · 完整汇总</div><div id="expanded" class="touchbar"></div></div></div></section>
+<section><h2>确认时只看这四件事</h2><ul class="notes"><li>你能否在不看文字、不看颜色时区分“工作 / 等待确认 / 等待回复 / 系统异常”？</li><li>哪个候选在 24–32px 下轮廓最稳定，缩小后不会糊成一个图标？</li><li>哪个候选最像安静的工作伴侣，而不是游戏角色或警报图标？</li><li>你确定候选方向后，我再把选中的前两名放进第一轮静态盲测，不会直接接入正式代码。</li></ul></section>
+</main>
+<script>
+const states=[
+{id:'idle',label:'空闲',color:'#929baa'},
+{id:'working',label:'正在工作',color:'#36c8f4'},
+{id:'waitingApproval',label:'等待确认',color:'#f1b34e'},
+{id:'waitingInput',label:'等待回复',color:'#f1b34e'},
+{id:'completed',label:'已完成',color:'#47d889'},
+{id:'failed',label:'任务失败',color:'#ef9667'},
+{id:'systemError',label:'系统异常',color:'#ff5967'},
+{id:'disconnected',label:'未连接',color:'#929baa'},
+{id:'stale',label:'状态过期',color:'#929baa'}
+];
+const candidates=[
+{id:'A',name:'几何小机器人',description:'方形头部、面板眼睛和明确四肢；优先验证状态清晰度。',body:'#e7edf3',shade:'#637287'},
+{id:'B',name:'小型像素动物',description:'三角耳朵、短尾和小爪；优先验证亲和力和陪伴感。',body:'#eee1c8',shade:'#95684d'},
+{id:'C',name:'像素小生物',description:'圆润团子、单片叶子和低细节；优先验证小尺寸稳定性。',body:'#dcefe5',shade:'#6e8e83'}
+];
+const base={
+A:['0000000000000000','0000111111000000','0001222222100000','0001222222100000','0012022202210000','0012222222210000','0012211122210000','0012222222210000','0001222222100000','0001222222100000','0000122221000000','0001122221100000','0000011100000000','0000011100000000','0000100100000000','0000000000000000'],
+B:['0000001100000000','0000011110000000','0000111111000000','0001111111100000','0011222222110000','0012222222210000','0112022202211000','0112222222211000','0112211122211000','0012222222210000','0011222222110000','0001111111100000','0000111111000000','0000011110000000','0000001100000000','0000000000000000'],
+C:['0000000000000000','0000001111000000','0000111111100000','0001111111110000','0011111111111000','0011122222111000','0111222222211100','0111222222211100','0111222222211100','0011122222111000','0011111111111000','0001111111110000','0000111111100000','0000001111000000','0000000000000000','0000000000000000']
+};
+let previewState=1,gray=false,scale=32;
+function gridToSvg(candidate,state){
+ const rows=base[candidate.id].map(r=>r.split(''));
+ const set=(x,y,v)=>{if(x>=0&&x<16&&y>=0&&y<16)rows[y][x]=v};
+ const clear=(x,y)=>set(x,y,'0');
+ const accent=state.color;
+ if(state.id==='working'){
+  for(let x=4;x<12;x++)for(let y=12;y<15;y++)set(x,y,'b');
+  set(3,11,'b');set(12,11,'b');
+ }
+ if(state.id==='waitingApproval'){for(let y=3;y<8;y++)set(13,y,'b');set(12,3,'b');set(14,2,'b');}
+ if(state.id==='waitingInput'){set(3,8,'b');set(2,7,'b');set(12,8,'b');set(13,7,'b');set(7,5,'b');set(8,5,'b');}
+ if(state.id==='completed'){for(let y=3;y<8;y++){set(2,y,'b');set(13,y,'b')}set(1,2,'b');set(14,2,'b');set(1,1,'b');set(14,1,'b');}
+ if(state.id==='failed'){for(let x=4;x<12;x++)clear(x,3);for(let x=5;x<11;x++)set(x,4,'s');set(6,5,'0');set(9,5,'0');set(6,6,'s');set(9,6,'s');}
+ if(state.id==='systemError'){set(6,5,'r');set(9,5,'r');set(6,6,'r');set(9,6,'r');set(7,5,'0');set(8,5,'0');set(7,6,'0');set(8,6,'0');set(7,9,'r');set(8,9,'r');}
+ if(state.id==='disconnected'){for(let x=2;x<14;x++)for(let y=8;y<13;y++)set(x,y,'s');for(let x=5;x<11;x++)clear(x,2);}
+ if(state.id==='stale'){set(12,9,'s');set(13,9,'s');set(12,10,'s');set(13,10,'s');set(12,11,'s');set(13,11,'s');set(13,10,'0');}
+ let rects='<rect width="16" height="16" fill="#07090c"/>';
+ for(let y=0;y<16;y++)for(let x=0;x<16;x++){const v=rows[y][x];if(v==='0')continue;let fill=v==='1'?candidate.body:v==='2'?candidate.shade:v==='b'?accent:v==='s'?'#7e8997':v==='r'?'#ff5967':accent;rects+='<rect x="'+x+'" y="'+y+'" width="1" height="1" fill="'+fill+'"/>'}
+ return '<svg class="pixel" width="'+scale+'" height="'+scale+'" viewBox="0 0 16 16" role="img" aria-label="'+candidate.name+' '+state.label+'" shape-rendering="crispEdges">'+rects+'</svg>';
+}
+function stateCard(c,s){return '<div class="state-card" data-state="'+s.id+'">'+gridToSvg(c,s)+'<div class="state-name">'+s.label+'</div></div>'}
+function render(){
+ document.getElementById('candidates').innerHTML=candidates.map(c=>'<article class="candidate"><h3>'+c.id+' / '+c.name+'</h3><div class="description">'+c.description+'</div><div class="state-grid">'+states.map(s=>stateCard(c,s)).join('')+'</div></article>').join('');
+ const c=candidates[1],s=states[previewState];
+ document.getElementById('compact').innerHTML='<div class="pet-slot">'+gridToSvg(c,s)+'</div>';
+ document.getElementById('expanded').innerHTML='<div class="pet-slot">'+gridToSvg(c,s)+'</div><div style="min-width:0"><div class="status" style="color:'+s.color+'">'+(s.id==='working'?'Codex 正在工作':s.label)+'</div><div class="secondary">'+(s.id==='working'?'正在处理 2 项工作 · 1 项待处理':'Touch Bar 只显示汇总，具体任务回到 Codex 查看')+'</div></div>';
+ document.getElementById('app').classList.toggle('grayscale',gray);
+}
+document.getElementById('gray').addEventListener('click',()=>{gray=!gray;document.getElementById('gray').setAttribute('aria-pressed',String(gray));document.getElementById('gray').textContent=gray?'退出去色预览':'切换去色预览';render()});
+document.getElementById('scale').addEventListener('change',e=>{scale=Number(e.target.value);render()});
+document.getElementById('next').addEventListener('click',()=>{previewState=(previewState+1)%states.length;render()});
+render();
+</script>
+</body>
+</html>

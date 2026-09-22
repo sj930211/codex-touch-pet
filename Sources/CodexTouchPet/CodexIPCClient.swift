@@ -8,13 +8,34 @@ private enum IPCSocketError: Error {
     case closed
     case invalidFrameLength(Int)
     case invalidJSON
+
+    var diagnosticCode: String {
+        switch self {
+        case .createFailed(let code): return "socket_create_\(code)"
+        case .pathTooLong: return "socket_path_too_long"
+        case .connectFailed(let code): return "socket_connect_\(code)"
+        case .closed: return "connection_closed"
+        case .invalidFrameLength: return "invalid_frame_length"
+        case .invalidJSON: return "invalid_json"
+        }
+    }
+
+    var isProtocolIncompatible: Bool {
+        switch self {
+        case .invalidFrameLength, .invalidJSON:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 private final class UnixFramedSocket {
     private let writeLock = NSLock()
+    private let descriptorLock = NSLock()
     private var descriptor: Int32 = -1
 
-    var isConnected: Bool { descriptor >= 0 }
+    var isConnected: Bool { currentDescriptor >= 0 }
 
     func connect(path: String) throws {
         close()
@@ -46,6 +67,10 @@ private final class UnixFramedSocket {
             buffer.copyBytes(from: pathBytes)
         }
 
+        descriptorLock.lock()
+        descriptor = socketDescriptor
+        descriptorLock.unlock()
+
         let result = withUnsafePointer(to: &address) { pointer in
             pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.connect(
@@ -57,19 +82,24 @@ private final class UnixFramedSocket {
         }
         guard result == 0 else {
             let code = errno
-            Darwin.close(socketDescriptor)
+            close(ifCurrent: socketDescriptor)
             throw IPCSocketError.connectFailed(code)
         }
-        descriptor = socketDescriptor
+        guard currentDescriptor == socketDescriptor else {
+            throw IPCSocketError.closed
+        }
     }
 
     func close() {
         writeLock.lock()
         defer { writeLock.unlock() }
-        guard descriptor >= 0 else { return }
-        Darwin.shutdown(descriptor, SHUT_RDWR)
-        Darwin.close(descriptor)
+        descriptorLock.lock()
+        let socketDescriptor = descriptor
         descriptor = -1
+        descriptorLock.unlock()
+        guard socketDescriptor >= 0 else { return }
+        Darwin.shutdown(socketDescriptor, SHUT_RDWR)
+        Darwin.close(socketDescriptor)
     }
 
     func send(_ object: [String: Any]) throws {
@@ -81,13 +111,14 @@ private final class UnixFramedSocket {
 
         writeLock.lock()
         defer { writeLock.unlock() }
-        guard descriptor >= 0 else { throw IPCSocketError.closed }
+        let socketDescriptor = currentDescriptor
+        guard socketDescriptor >= 0 else { throw IPCSocketError.closed }
         try frame.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress else { return }
             var offset = 0
             while offset < frame.count {
                 let written = Darwin.write(
-                    descriptor,
+                    socketDescriptor,
                     baseAddress.advanced(by: offset),
                     frame.count - offset
                 )
@@ -110,7 +141,12 @@ private final class UnixFramedSocket {
             throw IPCSocketError.invalidFrameLength(length)
         }
         let payload = try readExactly(length)
-        let value = try JSONSerialization.jsonObject(with: payload)
+        let value: Any
+        do {
+            value = try JSONSerialization.jsonObject(with: payload)
+        } catch {
+            throw IPCSocketError.invalidJSON
+        }
         guard let message = value as? [String: Any] else {
             throw IPCSocketError.invalidJSON
         }
@@ -118,13 +154,14 @@ private final class UnixFramedSocket {
     }
 
     private func readExactly(_ count: Int) throws -> Data {
-        guard descriptor >= 0 else { throw IPCSocketError.closed }
+        let socketDescriptor = currentDescriptor
+        guard socketDescriptor >= 0 else { throw IPCSocketError.closed }
         var bytes = [UInt8](repeating: 0, count: count)
         var offset = 0
         while offset < count {
             let readCount = bytes.withUnsafeMutableBytes { buffer in
                 Darwin.read(
-                    descriptor,
+                    socketDescriptor,
                     buffer.baseAddress?.advanced(by: offset),
                     count - offset
                 )
@@ -134,6 +171,24 @@ private final class UnixFramedSocket {
         }
         return Data(bytes)
     }
+
+    private var currentDescriptor: Int32 {
+        descriptorLock.lock()
+        defer { descriptorLock.unlock() }
+        return descriptor
+    }
+
+    private func close(ifCurrent socketDescriptor: Int32) {
+        descriptorLock.lock()
+        guard descriptor == socketDescriptor else {
+            descriptorLock.unlock()
+            return
+        }
+        descriptor = -1
+        descriptorLock.unlock()
+        Darwin.shutdown(socketDescriptor, SHUT_RDWR)
+        Darwin.close(socketDescriptor)
+    }
 }
 
 final class CodexIPCClient {
@@ -142,6 +197,7 @@ final class CodexIPCClient {
     private let threadProvider = RecentThreadProvider()
     private let worker = DispatchQueue(label: "dev.codex.touch-pet.ipc", qos: .userInitiated)
     private let stateLock = NSLock()
+    private let retrySignal = DispatchSemaphore(value: 0)
 
     private var running = false
     private var clientId = "initializing-client"
@@ -150,6 +206,7 @@ final class CodexIPCClient {
     private var subscriptionOwners: [String: String] = [:]
     private var lastProbeAt: [String: Date] = [:]
     private var sessionGeneration = UUID()
+    private var protocolRetryBlocked = false
 
     init(statusStore: ThreadStatusStore) {
         self.statusStore = statusStore
@@ -174,6 +231,7 @@ final class CodexIPCClient {
         let subscriptions = subscriptionOwners
         let currentClientId = clientId
         stateLock.unlock()
+        retrySignal.signal()
 
         for (threadId, ownerId) in subscriptions {
             try? sendFollowing(
@@ -185,8 +243,17 @@ final class CodexIPCClient {
         }
         socket.close()
         DispatchQueue.main.async { [weak self] in
-            self?.statusStore.setConnected(false)
+            self?.statusStore.markDisconnected(issueCode: "application_stopped")
         }
+    }
+
+    func reconnect() {
+        stateLock.lock()
+        protocolRetryBlocked = false
+        sessionGeneration = UUID()
+        stateLock.unlock()
+        socket.close()
+        retrySignal.signal()
     }
 
     private var shouldRun: Bool {
@@ -210,12 +277,27 @@ final class CodexIPCClient {
                 }
             } catch {
                 socket.close()
+                let issueCode = Self.diagnosticCode(for: error)
+                let incompatible = (error as? IPCSocketError)?.isProtocolIncompatible == true
+                let failedGeneration = currentSessionGeneration
+                if incompatible {
+                    blockProtocolRetries()
+                }
                 DispatchQueue.main.async { [weak self] in
-                    self?.statusStore.setConnected(false)
+                    guard let self, self.isCurrentGeneration(failedGeneration) else { return }
+                    if incompatible {
+                        guard self.isProtocolRetryBlocked else { return }
+                        self.statusStore.markIncompatible(issueCode: issueCode)
+                    } else {
+                        self.statusStore.markDisconnected(issueCode: issueCode)
+                    }
                 }
-                if shouldRun {
-                    Thread.sleep(forTimeInterval: 2)
-                }
+            }
+            guard shouldRun else { break }
+            if isProtocolRetryBlocked {
+                waitForManualReconnect()
+            } else {
+                Thread.sleep(forTimeInterval: 2)
             }
         }
     }
@@ -282,20 +364,35 @@ final class CodexIPCClient {
         return initializeRequestId
     }
 
+    private var currentSessionGeneration: UUID {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return sessionGeneration
+    }
+
     private func handleInitializeResponse(_ message: [String: Any]) {
+        let generation = currentSessionGeneration
         guard message["resultType"] as? String == "success",
               let result = message["result"] as? [String: Any],
               let resolvedClientId = result["clientId"] as? String else {
+            blockProtocolRetries()
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.isCurrentGeneration(generation),
+                      self.isProtocolRetryBlocked else { return }
+                self.statusStore.markIncompatible(issueCode: "initialize_rejected")
+            }
             socket.close()
             return
         }
         stateLock.lock()
         clientId = resolvedClientId
-        let generation = sessionGeneration
+        protocolRetryBlocked = false
         stateLock.unlock()
 
         DispatchQueue.main.async { [weak self] in
-            self?.statusStore.setConnected(true)
+            guard let self, self.isCurrentSession(generation) else { return }
+            self.statusStore.markConnected()
         }
         scheduleCandidateScan(generation: generation, after: 0)
     }
@@ -313,15 +410,16 @@ final class CodexIPCClient {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, self.isCurrentSession(generation) else { return }
             let recentThreads = self.threadProvider.recentThreads(limit: 20)
+            let filteredInternalCount = self.threadProvider.filteredInternalThreadCount()
             let threadIds = recentThreads.map(\.id)
-            for thread in recentThreads {
-                DispatchQueue.main.async { [weak self] in
-                    self?.statusStore.updateTitle(threadId: thread.id, title: thread.title)
-                }
-            }
             self.probeOwners(threadIds)
             DispatchQueue.main.async { [weak self] in
-                self?.statusStore.finishInitialScan()
+                guard let self, self.isCurrentSession(generation) else { return }
+                for thread in recentThreads {
+                    self.statusStore.updateTitle(threadId: thread.id, title: thread.title)
+                }
+                self.statusStore.updateFilteredInternalCount(filteredInternalCount)
+                self.statusStore.finishInitialScan()
             }
             self.scheduleCandidateScan(generation: generation, after: 5)
         }
@@ -331,6 +429,12 @@ final class CodexIPCClient {
         stateLock.lock()
         defer { stateLock.unlock() }
         return running && socket.isConnected && sessionGeneration == generation
+    }
+
+    private func isCurrentGeneration(_ generation: UUID) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return running && sessionGeneration == generation
     }
 
     private func probeOwners(_ threadIds: [String]) {
@@ -411,22 +515,24 @@ final class CodexIPCClient {
               let threadId = params["conversationId"] as? String,
               let change = params["change"] as? [String: Any],
               let changeType = change["type"] as? String else { return }
+        let generation = currentSessionGeneration
 
         if changeType == "snapshot",
            let state = change["conversationState"] as? [String: Any] {
-            applySnapshot(state, threadId: threadId)
+            applySnapshot(state, threadId: threadId, generation: generation)
         } else if changeType == "patches",
                   let patches = change["patches"] as? [[String: Any]] {
-            applyPatches(patches, threadId: threadId)
+            applyPatches(patches, threadId: threadId, generation: generation)
         }
     }
 
-    private func applySnapshot(_ state: [String: Any], threadId: String) {
+    private func applySnapshot(_ state: [String: Any], threadId: String, generation: UUID) {
         if let runtime = state["threadRuntimeStatus"] as? [String: Any],
            let type = runtime["type"] as? String {
             let flags = runtime["activeFlags"] as? [String] ?? []
             DispatchQueue.main.async { [weak self] in
-                self?.statusStore.updateRuntime(threadId: threadId, type: type, activeFlags: flags)
+                guard let self, self.isCurrentSession(generation) else { return }
+                self.statusStore.updateRuntime(threadId: threadId, type: type, activeFlags: flags)
             }
         }
         // Snapshot payloads contain historical turn items. Activity labels are
@@ -434,7 +540,7 @@ final class CodexIPCClient {
         // pin the current task to "调用工具" forever.
     }
 
-    private func applyPatches(_ patches: [[String: Any]], threadId: String) {
+    private func applyPatches(_ patches: [[String: Any]], threadId: String, generation: UUID) {
         for patch in patches {
             let path = patch["path"] as? [Any] ?? []
             let pathStrings = path.map(String.init(describing:))
@@ -445,21 +551,24 @@ final class CodexIPCClient {
                let type = runtime["type"] as? String {
                 let flags = runtime["activeFlags"] as? [String] ?? []
                 DispatchQueue.main.async { [weak self] in
-                    self?.statusStore.updateRuntime(threadId: threadId, type: type, activeFlags: flags)
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.statusStore.updateRuntime(threadId: threadId, type: type, activeFlags: flags)
                 }
                 continue
             }
 
             if Self.isTurnStatusPath(pathStrings), let status = value as? String {
                 DispatchQueue.main.async { [weak self] in
-                    self?.statusStore.updateTurn(threadId: threadId, status: status)
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.statusStore.updateTurn(threadId: threadId, status: status)
                 }
                 continue
             }
 
             if let activity = Self.findActivity(in: value, maximumDepth: 4) {
                 DispatchQueue.main.async { [weak self] in
-                    self?.statusStore.updateActivity(threadId: threadId, activity: activity)
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.statusStore.updateActivity(threadId: threadId, activity: activity)
                 }
             }
         }
@@ -511,10 +620,36 @@ final class CodexIPCClient {
         }
     }
 
+    private static func diagnosticCode(for error: Error) -> String {
+        if let error = error as? IPCSocketError {
+            return error.diagnosticCode
+        }
+        return "unknown_ipc_error"
+    }
+
+    private var isProtocolRetryBlocked: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return protocolRetryBlocked
+    }
+
+    private func blockProtocolRetries() {
+        stateLock.lock()
+        protocolRetryBlocked = true
+        stateLock.unlock()
+    }
+
+    private func waitForManualReconnect() {
+        while shouldRun && isProtocolRetryBlocked {
+            _ = retrySignal.wait(timeout: .now() + 1)
+        }
+    }
+
     private func handleClientStatus(_ message: [String: Any]) {
         guard let params = message["params"] as? [String: Any],
               params["status"] as? String == "disconnected",
               let disconnectedClientId = params["clientId"] as? String else { return }
+        let generation = currentSessionGeneration
         stateLock.lock()
         let affected = subscriptionOwners.compactMap { threadId, ownerId in
             ownerId == disconnectedClientId ? threadId : nil
@@ -525,7 +660,8 @@ final class CodexIPCClient {
         stateLock.unlock()
         for threadId in affected {
             DispatchQueue.main.async { [weak self] in
-                self?.statusStore.removeThread(threadId)
+                guard let self, self.isCurrentSession(generation) else { return }
+                self.statusStore.removeThread(threadId)
             }
         }
     }

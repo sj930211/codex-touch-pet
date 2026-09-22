@@ -1,0 +1,26 @@
+{
+  "ok": true,
+  "chroma_key": {
+    "hex": "#00FF00",
+    "rgb": [
+      0,
+      255,
+      0
+    ],
+    "threshold": 96.0
+  },
+  "rows": [
+    {
+      "state": "running",
+      "frames": [
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/00.png",
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/01.png",
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/02.png",
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/03.png",
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/04.png",
+        "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v1/frames/running/05.png"
+      ],
+      "method": "components"
+    }
+  ]
+}

@@ -14,9 +14,6 @@ struct RecentThreadProvider {
 
     func recentThreads(limit: Int = 20) -> [RecentThread] {
         var result: [String] = []
-        if let current = ProcessInfo.processInfo.environment["CODEX_THREAD_ID"], !current.isEmpty {
-            result.append(current + "\t当前会话")
-        }
 
         guard let database = stateDatabasePath() else {
             return uniqueThreads(result.map(parseThread))
@@ -57,6 +54,18 @@ struct RecentThreadProvider {
         return uniqueThreads(result.map(parseThread))
     }
 
+    func filteredInternalThreadCount() -> Int? {
+        guard let database = stateDatabasePath() else { return nil }
+        let output = runSQLite(
+            database: database,
+            query: "SELECT count(*) FROM threads WHERE archived = 0 " +
+                "AND source LIKE '%\"subagent\"%';"
+        )
+        return output.flatMap {
+            Int($0.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
     private func parseThread(_ value: String) -> RecentThread {
         let parts = value.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
         let id = parts.first.map(String.init) ?? value
@@ -76,5 +85,23 @@ struct RecentThreadProvider {
             "\(home)/.codex/sqlite/state_5.sqlite"
         ]
         return candidates.first(where: fileManager.fileExists(atPath:))
+    }
+
+    private func runSQLite(database: String, query: String) -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = ["-readonly", database, query]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return nil }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        } catch {
+            return nil
+        }
     }
 }

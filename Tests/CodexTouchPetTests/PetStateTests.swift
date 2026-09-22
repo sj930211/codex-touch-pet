@@ -58,7 +58,7 @@ final class PetStateTests: XCTestCase {
             connected: true
         )
         XCTAssertEqual(status.state, .working(nil))
-        XCTAssertEqual(status.activityLabel, "Codex 正在工作")
+        XCTAssertEqual(status.activityLabel, "工作中")
     }
 
     func testSystemErrorHasHighestPriority() {
@@ -83,15 +83,15 @@ final class PetStateTests: XCTestCase {
             connected: true
         )
         XCTAssertEqual(status.state, .working(nil))
-        XCTAssertEqual(status.activityLabel, "Codex 正在工作")
+        XCTAssertEqual(status.activityLabel, "工作中")
         XCTAssertTrue(status.tasks.contains(where: { $0.state == .systemError }))
     }
 
     func testWorkingLabelDoesNotExposeActivityAsPrimaryState() {
-        XCTAssertEqual(PetState.working(.tool).label, "Codex 正在工作")
+        XCTAssertEqual(PetState.working(.tool).label, "工作中")
     }
 
-    func testTasksAreOrderedForCarousel() {
+    func testTasksAreOrderedForTouchBarRail() {
         let now = Date()
         let status = PetStatusAggregator.aggregate(
             [
@@ -102,6 +102,57 @@ final class PetStateTests: XCTestCase {
             connected: true
         )
         XCTAssertEqual(status.tasks.map(\.threadId), ["waiting", "working", "idle"])
-        XCTAssertEqual(status.carouselTasks.map(\.threadId), ["waiting", "working"])
+        XCTAssertEqual(status.touchBarTasks.map(\.threadId), ["waiting", "working"])
+    }
+
+    func testTaskChipTitleIsBoundedWithoutChangingIdentity() {
+        let task = ThreadPetStatus(
+            threadId: "precise-thread-id",
+            state: .working(nil),
+            updatedAt: Date(),
+            title: "  Touch   Bar 狐狸动画优化  "
+        )
+
+        XCTAssertEqual(task.displayTitle, "Touch Bar 狐狸动画优化")
+        XCTAssertEqual(task.abbreviatedTitle(), "狐狸动画优化")
+        XCTAssertEqual(task.threadId, "precise-thread-id")
+    }
+
+    func testTaskChipTitleKeepsSemanticObjectAndIssue() {
+        XCTAssertEqual(
+            ThreadPetStatus(
+                threadId: "hub",
+                state: .working(nil),
+                updatedAt: Date(),
+                title: "为什么我的电脑上的 hub 没有东西展示了"
+            ).abbreviatedTitle(),
+            "Hub 显示异常"
+        )
+        XCTAssertEqual(
+            ThreadPetStatus(
+                threadId: "deskflow",
+                state: .working(nil),
+                updatedAt: Date(),
+                title: "查看 Deskflow 项目，为什么局域网还是会卡顿"
+            ).abbreviatedTitle(),
+            "Deskflow 卡顿"
+        )
+        XCTAssertEqual(
+            ThreadPetStatus(
+                threadId: "zentao",
+                state: .working(nil),
+                updatedAt: Date(),
+                title: "阅读一下禅道需求3222"
+            ).abbreviatedTitle(),
+            "禅道需求 3222"
+        )
+    }
+
+    func testCodexThreadLinkUsesExactThreadAndHostIdentity() {
+        XCTAssertEqual(
+            CodexThreadLink.url(threadID: " precise-thread-id ")?.absoluteString,
+            "codex://threads/precise-thread-id?hostId=local"
+        )
+        XCTAssertNil(CodexThreadLink.url(threadID: "  "))
     }
 }

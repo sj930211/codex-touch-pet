@@ -1,4 +1,39 @@
 import AppKit
+import QuartzCore
+#if canImport(TouchBarPrivate)
+import TouchBarPrivate
+#endif
+
+private final class TaskChipButton: NSButton {
+    var threadID = ""
+    private var accentColor: NSColor = .secondaryLabelColor
+
+    override var intrinsicContentSize: NSSize {
+        let contentSize = super.intrinsicContentSize
+        return NSSize(width: contentSize.width + 16, height: 26)
+    }
+
+    func applyCapsuleStyle(accentColor: NSColor) {
+        self.accentColor = accentColor
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 13
+        layer?.cornerCurve = .continuous
+        layer?.borderWidth = 0.75
+        updateCapsuleAppearance(isPressed: false)
+    }
+
+    override func highlight(_ flag: Bool) {
+        super.highlight(flag)
+        updateCapsuleAppearance(isPressed: flag)
+    }
+
+    private func updateCapsuleAppearance(isPressed: Bool) {
+        let accentAlpha: CGFloat = isPressed ? 0.30 : 0.14
+        layer?.backgroundColor = accentColor.withAlphaComponent(accentAlpha).cgColor
+        layer?.borderColor = accentColor.withAlphaComponent(isPressed ? 0.82 : 0.48).cgColor
+    }
+}
 
 final class TouchBarController: NSObject, NSTouchBarDelegate {
     private enum Identifier {
@@ -8,7 +43,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     let isPrivateTouchBarAvailable = CTPPrivateTouchBarAvailable()
-    private(set) var quietMode = false
+    private(set) var settings = AppSettings()
 
     private var touchBar: NSTouchBar?
     private var trayItem: NSCustomTouchBarItem?
@@ -17,21 +52,24 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private var petImageView: NSImageView?
     private var petFallbackLabel: NSTextField?
     private var statusLabel: NSTextField?
-    private var summaryLabel: NSTextField?
+    private var taskScrollView: NSScrollView?
+    private var taskStackView: NSStackView?
     private var connectionLabel: NSTextField?
+    private var taskChipOrder: [String] = []
+    private var renderedTaskChips: [TaskChipSnapshot] = []
+    private var renderedTaskFallback: String?
     private let artwork = PetArtwork()
     private var animationTimer: Timer?
-    private var taskCarouselTimer: Timer?
     private var trayRestoreWorkItem: DispatchWorkItem?
     private var collapseTimer: Timer?
     private var current = AggregatePetStatus(
         state: .disconnected,
+        connectionState: .disconnected,
         activeCount: 0,
         waitingCount: 0,
         trackedCount: 0
     )
     private var frameIndex = 0
-    private var carouselIndex = 0
     private var isExpanded = false
     private var codexIsActive = false
 
@@ -39,7 +77,25 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         let scale: CGFloat
         let x: CGFloat
         let y: CGFloat
+        let rotation: CGFloat
         let opacity: CGFloat
+    }
+
+    private struct TaskChipSnapshot: Equatable {
+        let threadID: String
+        let fullTitle: String
+        let abbreviatedTitle: String
+        let state: PetAnimationIdentity
+    }
+
+    private struct TaskChipStyle {
+        let color: NSColor
+        let stateLabel: String
+    }
+
+    private enum AnimationFrameLimit {
+        static let completed = 7
+        static let error = 7
     }
 
     func start() {
@@ -56,24 +112,16 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
         let trayItem = NSCustomTouchBarItem(identifier: Identifier.tray)
         let trayButton = NSButton(title: "🐾", target: self, action: #selector(toggleExpanded))
-        trayButton.bezelColor = current.state.compactBackgroundColor
+        trayButton.bezelColor = compactBackgroundColor
         trayItem.view = trayButton
         self.trayItem = trayItem
         self.trayButton = trayButton
-        CTPAddSystemTrayItem(trayItem)
-        scheduleTrayRestore()
+        syncTrayRegistration()
 
         animationTimer = Timer.scheduledTimer(
-            timeInterval: 0.7,
+            timeInterval: 0.10,
             target: self,
             selector: #selector(advanceAnimation),
-            userInfo: nil,
-            repeats: true
-        )
-        taskCarouselTimer = Timer.scheduledTimer(
-            timeInterval: 5.0,
-            target: self,
-            selector: #selector(advanceTaskCarousel),
             userInfo: nil,
             repeats: true
         )
@@ -94,8 +142,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         collapseTimer = nil
         animationTimer?.invalidate()
         animationTimer = nil
-        taskCarouselTimer?.invalidate()
-        taskCarouselTimer = nil
         trayRestoreWorkItem?.cancel()
         trayRestoreWorkItem = nil
         if let touchBar {
@@ -112,12 +158,14 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
     func update(_ status: AggregatePetStatus) {
         precondition(Thread.isMainThread)
+        let stateChanged = current.state.animationIdentity != status.state.animationIdentity
+        let connectionChanged = current.connectionState != status.connectionState
+        if stateChanged || connectionChanged {
+            prepareStateCrossfade()
+        }
         current = status
-        frameIndex = 0
-        if current.carouselTasks.isEmpty {
-            carouselIndex = 0
-        } else {
-            carouselIndex %= current.carouselTasks.count
+        if stateChanged {
+            frameIndex = 0
         }
         updateViews()
     }
@@ -128,29 +176,53 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         precondition(Thread.isMainThread)
         guard codexIsActive != isActive else { return }
         codexIsActive = isActive
-        guard !quietMode else { return }
         if isActive {
-            showExpanded()
+            if settings.shouldAutoExpand {
+                showExpanded()
+            }
         } else {
             hideExpanded()
         }
     }
 
-    func setQuietMode(_ enabled: Bool) {
-        quietMode = enabled
-        if enabled {
+    func applySettings(_ newSettings: AppSettings) {
+        precondition(Thread.isMainThread)
+        let previousSettings = settings
+        settings = newSettings
+        frameIndex = 0
+
+        if newSettings.quietMode {
             hideExpanded()
-        } else if codexIsActive {
+        } else if !previousSettings.shouldAutoExpand,
+                  newSettings.shouldAutoExpand,
+                  codexIsActive {
             showExpanded()
         }
+        syncTrayRegistration()
+        updateViews()
     }
 
     func showExpanded() {
         guard isPrivateTouchBarAvailable, let touchBar else { return }
         collapseTimer?.invalidate()
         collapseTimer = nil
+        if let trayItem {
+            CTPAddSystemTrayItem(trayItem)
+        }
         CTPPresentSystemModalTouchBar(touchBar, Identifier.tray)
         isExpanded = true
+        if !settings.keepCompactPet, let trayItem {
+            // The private modal API exposes no callback when the user presses
+            // the system collapse control. Once presentation has completed,
+            // unregister the anchor so that path cannot leave a compact item.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self, weak trayItem] in
+                guard let self,
+                      self.isExpanded,
+                      !self.settings.keepCompactPet,
+                      let trayItem else { return }
+                CTPRemoveSystemTrayItem(trayItem)
+            }
+        }
     }
 
     func touchBar(
@@ -206,13 +278,25 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             primary.setContentCompressionResistancePriority(.required, for: .horizontal)
             primary.translatesAutoresizingMaskIntoConstraints = false
 
-            let summary = NSTextField(labelWithString: taskSummaryLabel)
-            summary.alignment = .left
-            summary.font = .systemFont(ofSize: 12, weight: .regular)
-            summary.textColor = .secondaryLabelColor
-            summary.lineBreakMode = .byTruncatingTail
-            summary.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            summary.translatesAutoresizingMaskIntoConstraints = false
+            let taskScroll = NSScrollView()
+            taskScroll.drawsBackground = false
+            taskScroll.borderType = .noBorder
+            taskScroll.hasHorizontalScroller = false
+            taskScroll.hasVerticalScroller = false
+            taskScroll.autohidesScrollers = true
+            taskScroll.horizontalScrollElasticity = .automatic
+            taskScroll.verticalScrollElasticity = .none
+            taskScroll.scrollerStyle = .overlay
+            taskScroll.translatesAutoresizingMaskIntoConstraints = false
+
+            let taskStack = NSStackView()
+            taskStack.orientation = .horizontal
+            taskStack.alignment = .centerY
+            taskStack.distribution = .fill
+            taskStack.spacing = 6
+            taskStack.edgeInsets = NSEdgeInsets(top: 1, left: 0, bottom: 1, right: 10)
+            taskStack.frame = NSRect(x: 0, y: 0, width: 1, height: 28)
+            taskScroll.documentView = taskStack
 
             let connection = NSTextField(labelWithString: connectionStatusLabel)
             connection.alignment = .right
@@ -223,7 +307,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             connection.translatesAutoresizingMaskIntoConstraints = false
 
             container.addSubview(primary)
-            container.addSubview(summary)
+            container.addSubview(taskScroll)
             container.addSubview(connection)
             let preferredWidth = container.widthAnchor.constraint(equalToConstant: 540)
             preferredWidth.priority = .defaultHigh
@@ -233,16 +317,19 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
                 container.heightAnchor.constraint(equalToConstant: 30),
                 primary.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
                 primary.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                summary.leadingAnchor.constraint(equalTo: primary.trailingAnchor, constant: 14),
-                summary.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                summary.trailingAnchor.constraint(equalTo: connection.leadingAnchor, constant: -12),
+                taskScroll.leadingAnchor.constraint(equalTo: primary.trailingAnchor, constant: 10),
+                taskScroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
+                taskScroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1),
+                taskScroll.trailingAnchor.constraint(equalTo: connection.leadingAnchor, constant: -8),
                 connection.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
                 connection.centerYAnchor.constraint(equalTo: container.centerYAnchor),
                 connection.widthAnchor.constraint(equalToConstant: 58)
             ])
             statusLabel = primary
-            summaryLabel = summary
+            taskScrollView = taskScroll
+            taskStackView = taskStack
             connectionLabel = connection
+            rebuildTaskRailIfNeeded(force: true)
             item.view = container
             return item
 
@@ -270,15 +357,28 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         // Keep the pet in Control Strip when the full panel is hidden. A
         // dismiss removes the system-modal session entirely; minimize returns
         // it to the registered tray item, matching the manual close behavior.
-        CTPMinimizeSystemModalTouchBar(touchBar)
+        if settings.keepCompactPet {
+            CTPMinimizeSystemModalTouchBar(touchBar)
+        } else {
+            CTPDismissSystemModalTouchBar(touchBar)
+        }
         isExpanded = false
-        scheduleTrayRestore()
+        syncTrayRegistration()
     }
 
     private func scheduleTrayRestore() {
         trayRestoreWorkItem?.cancel()
+        guard settings.keepCompactPet else {
+            if let trayItem {
+                CTPRemoveSystemTrayItem(trayItem)
+            }
+            return
+        }
         let workItem = DispatchWorkItem { [weak self] in
-            guard let self, !self.isExpanded, let trayItem = self.trayItem else { return }
+            guard let self,
+                  !self.isExpanded,
+                  self.settings.keepCompactPet,
+                  let trayItem = self.trayItem else { return }
             CTPAddSystemTrayItem(trayItem)
         }
         trayRestoreWorkItem = workItem
@@ -294,53 +394,61 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     @objc private func advanceAnimation() {
-        frameIndex += 1
-        updateViews()
-    }
-
-    @objc private func advanceTaskCarousel() {
-        guard current.carouselTasks.count > 1 else { return }
-        carouselIndex = (carouselIndex + 1) % current.carouselTasks.count
-        updateViews()
+        if shouldAdvancePetAnimation {
+            if artwork.animationLoops(for: current.state),
+               let frameCount = artwork.animationFrameCount(for: current.state) {
+                frameIndex = (frameIndex + 1) % frameCount
+            } else {
+                frameIndex += 1
+            }
+        }
+        updatePetArtwork()
     }
 
     private func updateViews() {
-        let image = artwork.image(for: current.state)
-        let animatedImage = image.map(animatedPetImage)
+        updatePetArtwork()
+        trayButton?.bezelColor = compactBackgroundColor
+        trayButton?.contentTintColor = nil
+        petLabel?.stringValue = face(for: current.state, expanded: true)
+        petLabel?.textColor = statusColor
+        statusLabel?.stringValue = primaryStatusLabel
+        statusLabel?.textColor = statusColor
+        rebuildTaskRailIfNeeded()
+        connectionLabel?.stringValue = connectionStatusLabel
+        connectionLabel?.textColor = connectionColor
+    }
+
+    private func updatePetArtwork() {
+        let usesSpriteAnimation = artwork.hasAnimatedFrames(for: current.state)
+        let frame = effectiveMotion == .standard ? frameIndex : 0
+        let image = artwork.image(for: current.state, frameIndex: frame)
+        let animatedImage = image.map { usesSpriteAnimation ? $0 : animatedPetImage($0) }
         // Preserve the approved full-color fox. Only the compact button
         // background carries the semantic state color.
         trayButton?.image = animatedImage
         trayButton?.title = image == nil ? face(for: current.state) : ""
         trayButton?.imagePosition = image == nil ? .noImage : .imageOnly
-        trayButton?.bezelColor = current.state.compactBackgroundColor
-        trayButton?.contentTintColor = nil
         petImageView?.image = animatedImage
         petImageView?.isHidden = image == nil
         petFallbackLabel?.isHidden = image != nil
-        petLabel?.stringValue = face(for: current.state, expanded: true)
-        petLabel?.textColor = statusColor
-        statusLabel?.stringValue = primaryStatusLabel
-        statusLabel?.textColor = statusColor
-        summaryLabel?.stringValue = taskSummaryLabel
-        summaryLabel?.textColor = summaryColor
-        connectionLabel?.stringValue = connectionStatusLabel
-        connectionLabel?.textColor = connectionColor
     }
 
     private func animatedPetImage(_ image: NSImage) -> NSImage {
         let motion = petMotion
         let canvas = NSImage(size: image.size)
         canvas.lockFocus()
-        let width = image.size.width * motion.scale
-        let height = image.size.height * motion.scale
-        let destination = NSRect(
-            x: (image.size.width - width) / 2 + image.size.width * motion.x,
-            y: (image.size.height - height) / 2 + image.size.height * motion.y,
-            width: width,
-            height: height
+
+        let transform = NSAffineTransform()
+        transform.translateX(
+            by: image.size.width * (0.5 + motion.x),
+            yBy: image.size.height * (0.5 + motion.y)
         )
+        transform.rotate(byDegrees: motion.rotation)
+        transform.scale(by: motion.scale)
+        transform.translateX(by: -image.size.width / 2, yBy: -image.size.height / 2)
+        transform.concat()
         image.draw(
-            in: destination,
+            in: NSRect(origin: .zero, size: image.size),
             from: .zero,
             operation: .sourceOver,
             fraction: motion.opacity
@@ -351,126 +459,289 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private var petMotion: PetMotion {
+        if artwork.hasAnimatedFrames(for: current.state) {
+            return PetMotion(scale: 1, x: 0, y: 0, rotation: 0, opacity: 1)
+        }
+        guard effectiveMotion == .standard else {
+            return PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+        }
         switch current.state {
         case .idle, .interrupted, .disconnected:
-            let scales: [CGFloat] = [0.94, 0.96, 0.98, 0.96]
-            return PetMotion(scale: scales[frameIndex % scales.count], x: 0, y: 0, opacity: 1)
+            let frames: [PetMotion] = [
+                PetMotion(scale: 1.08, x: 0, y: -0.006, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: -0.7, opacity: 1),
+                PetMotion(scale: 1.12, x: 0, y: 0.008, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0.7, opacity: 1)
+            ]
+            return frames[frameIndex % frames.count]
         case .working:
             let frames: [PetMotion] = [
-                PetMotion(scale: 0.96, x: 0, y: 0, opacity: 1),
-                PetMotion(scale: 0.98, x: 0, y: 0.018, opacity: 1),
-                PetMotion(scale: 0.96, x: 0, y: 0, opacity: 1),
-                PetMotion(scale: 0.95, x: 0, y: -0.008, opacity: 1)
+                PetMotion(scale: 1.10, x: -0.020, y: 0, rotation: -1.8, opacity: 1),
+                PetMotion(scale: 1.13, x: -0.008, y: 0.018, rotation: -0.6, opacity: 1),
+                PetMotion(scale: 1.11, x: 0.010, y: 0.004, rotation: 0.8, opacity: 1),
+                PetMotion(scale: 1.14, x: 0.024, y: 0.022, rotation: 1.8, opacity: 1),
+                PetMotion(scale: 1.11, x: 0.008, y: 0.003, rotation: 0.5, opacity: 1),
+                PetMotion(scale: 1.09, x: -0.010, y: -0.008, rotation: -0.8, opacity: 1)
             ]
             return frames[frameIndex % frames.count]
         case .connecting:
-            let opacities: [CGFloat] = [0.66, 0.82, 1.0, 0.82]
-            return PetMotion(scale: 0.96, x: 0, y: 0, opacity: opacities[frameIndex % opacities.count])
+            let frames: [PetMotion] = [
+                PetMotion(scale: 1.10, x: -0.045, y: 0, rotation: -2.2, opacity: 1),
+                PetMotion(scale: 1.12, x: -0.022, y: 0.014, rotation: -1.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.12, x: 0.022, y: 0.014, rotation: 1.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0.045, y: 0, rotation: 2.2, opacity: 1),
+                PetMotion(scale: 1.11, x: 0.022, y: 0.010, rotation: 1.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.11, x: -0.022, y: 0.010, rotation: -1.0, opacity: 1)
+            ]
+            return frames[frameIndex % frames.count]
         case .waitingApproval, .waitingInput:
-            let offsets: [CGFloat] = [0, 0.026, 0, -0.010]
-            return PetMotion(scale: 0.97, x: 0, y: offsets[frameIndex % offsets.count], opacity: 1)
+            guard settings.shouldPlayCompletionAndWaitingPrompts else {
+                return PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            }
+            let frames: [PetMotion] = [
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.12, x: -0.014, y: 0.014, rotation: -2.5, opacity: 1),
+                PetMotion(scale: 1.13, x: -0.020, y: 0.026, rotation: -4.0, opacity: 1),
+                PetMotion(scale: 1.12, x: -0.014, y: 0.014, rotation: -2.5, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            ]
+            return frames[frameIndex % frames.count]
         case .completed:
-            let scales: [CGFloat] = [0.94, 1.0, 0.97, 1.0]
-            return PetMotion(scale: scales[frameIndex % scales.count], x: 0, y: 0, opacity: 1)
+            guard settings.shouldPlayCompletionAndWaitingPrompts,
+                  frameIndex < AnimationFrameLimit.completed else {
+                return PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            }
+            let frames: [PetMotion] = [
+                PetMotion(scale: 1.08, x: 0, y: -0.012, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.13, x: -0.016, y: 0.022, rotation: -2.5, opacity: 1),
+                PetMotion(scale: 1.16, x: 0, y: 0.050, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.13, x: 0.016, y: 0.022, rotation: 2.5, opacity: 1),
+                PetMotion(scale: 1.09, x: 0, y: -0.010, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.12, x: 0, y: 0.010, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            ]
+            return frames[frameIndex]
         case .failed, .systemError:
-            let offsets: [CGFloat] = [-0.018, 0.018, -0.010, 0.010, 0]
-            return PetMotion(scale: 0.96, x: offsets[frameIndex % offsets.count], y: 0, opacity: 1)
+            guard frameIndex < AnimationFrameLimit.error else {
+                return PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            }
+            let frames: [PetMotion] = [
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1),
+                PetMotion(scale: 1.10, x: -0.035, y: 0, rotation: -3.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0.035, y: 0, rotation: 3.0, opacity: 1),
+                PetMotion(scale: 1.10, x: -0.024, y: 0, rotation: -2.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0.024, y: 0, rotation: 2.0, opacity: 1),
+                PetMotion(scale: 1.09, x: -0.010, y: -0.010, rotation: -1.0, opacity: 1),
+                PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
+            ]
+            return frames[frameIndex]
+        }
+    }
+
+    private var effectiveMotion: EffectivePetMotion {
+        settings.effectiveMotion(
+            systemReduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
+    }
+
+    private var shouldAdvancePetAnimation: Bool {
+        guard effectiveMotion == .standard else { return false }
+        if let frameCount = artwork.animationFrameCount(for: current.state) {
+            return artwork.animationLoops(for: current.state) || frameIndex < frameCount - 1
+        }
+        switch current.state {
+        case .waitingApproval, .waitingInput:
+            return settings.shouldPlayCompletionAndWaitingPrompts
+        case .completed:
+            return settings.shouldPlayCompletionAndWaitingPrompts
+                && frameIndex < AnimationFrameLimit.completed - 1
+        case .failed, .systemError:
+            return frameIndex < AnimationFrameLimit.error - 1
+        default:
+            return true
         }
     }
 
     private var primaryStatusLabel: String {
+        switch current.connectionState {
+        case .stale:
+            return "状态过期"
+        case .incompatible:
+            return "不兼容"
+        case .disconnected where current.tasks.isEmpty:
+            return "未连接"
+        default:
+            break
+        }
         if current.activeCount > 0 {
-            return "Codex 正在工作"
+            return "工作中"
         }
         return current.state.label
     }
 
-    private var taskSummaryLabel: String {
-        if current.activeCount > 0 {
-            let tasks = current.carouselTasks.filter { task in
-                if case .working = task.state { return true }
-                return false
-            }
-            guard !tasks.isEmpty else {
-                return "\(current.activeCount) 项任务 · 当前任务"
-            }
-            let task = tasks[carouselIndex % tasks.count]
-            return "\(current.activeCount) 项任务 · \(task.displayTitle) · 已运行 \(runtimeLabel(for: task))"
-        }
-        switch current.state {
-        case .idle:
-            return "等待新任务"
-        case .waitingApproval, .waitingInput:
-            return current.waitingCount == 1
-                ? "1 项任务需要处理"
-                : "\(current.waitingCount) 项任务需要处理"
-        case .completed:
-            return "刚刚完成"
-        case .interrupted:
-            return "任务已停止"
-        case .failed, .systemError:
-            return "点击查看详情"
-        case .connecting:
-            return "正在连接"
+    private var taskRailFallbackLabel: String {
+        switch current.connectionState {
+        case .stale:
+            return "最后状态可能已失效"
+        case .incompatible:
+            return "请查看诊断信息"
         case .disconnected:
-            return "未连接"
+            return "等待 Codex 启动"
+        case .connecting, .reconnecting:
+            return "连接中"
+        default:
+            return "等待新任务"
+        }
+    }
+
+    private var visibleTaskRailTasks: [PetTaskStatus] {
+        switch current.connectionState {
+        case .stale, .incompatible, .disconnected:
+            return []
+        case .connecting, .reconnecting, .online:
+            return current.touchBarTasks
+        }
+    }
+
+    private func rebuildTaskRailIfNeeded(force: Bool = false) {
+        guard let taskScrollView, let taskStackView else { return }
+
+        let visibleTasks = visibleTaskRailTasks
+        let visibleIDs = Set(visibleTasks.map(\.threadId))
+        taskChipOrder.removeAll { !visibleIDs.contains($0) }
+        for task in visibleTasks where !taskChipOrder.contains(task.threadId) {
+            taskChipOrder.append(task.threadId)
+        }
+
+        var tasksByID: [String: PetTaskStatus] = [:]
+        for task in visibleTasks where tasksByID[task.threadId] == nil {
+            tasksByID[task.threadId] = task
+        }
+        let orderedTasks = taskChipOrder.compactMap { tasksByID[$0] }
+        let snapshots = orderedTasks.map {
+            TaskChipSnapshot(
+                threadID: $0.threadId,
+                fullTitle: $0.displayTitle,
+                abbreviatedTitle: $0.abbreviatedTitle(),
+                state: $0.state.animationIdentity
+            )
+        }
+        let fallback = snapshots.isEmpty ? taskRailFallbackLabel : nil
+        guard force || snapshots != renderedTaskChips || fallback != renderedTaskFallback else { return }
+
+        let previousOffset = taskScrollView.contentView.bounds.origin.x
+        for view in taskStackView.arrangedSubviews {
+            taskStackView.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        if snapshots.isEmpty {
+            let label = NSTextField(labelWithString: fallback ?? "等待新任务")
+            label.font = .systemFont(ofSize: 11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.lineBreakMode = .byTruncatingTail
+            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            taskStackView.addArrangedSubview(label)
+        } else {
+            for (task, snapshot) in zip(orderedTasks, snapshots) {
+                taskStackView.addArrangedSubview(taskChipButton(for: task, snapshot: snapshot))
+            }
+        }
+
+        renderedTaskChips = snapshots
+        renderedTaskFallback = fallback
+        resizeTaskRail(preservingX: previousOffset)
+        DispatchQueue.main.async { [weak self] in
+            self?.resizeTaskRail(preservingX: previousOffset)
+        }
+    }
+
+    private func taskChipButton(for task: PetTaskStatus, snapshot: TaskChipSnapshot) -> NSButton {
+        let style = taskChipStyle(for: task.state)
+        let button = TaskChipButton(
+            title: snapshot.abbreviatedTitle,
+            target: self,
+            action: #selector(openTask(_:))
+        )
+        button.threadID = snapshot.threadID
+        button.controlSize = .small
+        button.font = .systemFont(ofSize: 10.5, weight: .semibold)
+        button.attributedTitle = NSAttributedString(
+            string: snapshot.abbreviatedTitle,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 10.5, weight: .semibold),
+                .foregroundColor: NSColor(calibratedWhite: 0.96, alpha: 1)
+            ]
+        )
+        button.contentTintColor = NSColor(calibratedWhite: 0.96, alpha: 1)
+        button.alignment = .center
+        button.lineBreakMode = .byTruncatingTail
+        button.toolTip = "\(snapshot.fullTitle) · \(style.stateLabel)"
+        button.setAccessibilityLabel("\(snapshot.fullTitle)，\(style.stateLabel)")
+        button.applyCapsuleStyle(accentColor: style.color)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            button.heightAnchor.constraint(equalToConstant: 26),
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
+            button.widthAnchor.constraint(lessThanOrEqualToConstant: 112)
+        ])
+        return button
+    }
+
+    private func taskChipStyle(for state: PetState) -> TaskChipStyle {
+        switch state {
         case .working:
-            return "当前任务"
+            return TaskChipStyle(color: PetState.working(nil).color, stateLabel: "工作中")
+        case .waitingApproval:
+            return TaskChipStyle(color: .systemOrange, stateLabel: "待确认")
+        case .waitingInput:
+            return TaskChipStyle(color: .systemOrange, stateLabel: "待回复")
+        case .completed:
+            return TaskChipStyle(color: .systemGreen, stateLabel: "已完成")
+        case .failed:
+            return TaskChipStyle(color: .systemRed, stateLabel: "失败")
+        case .systemError:
+            return TaskChipStyle(color: .systemRed, stateLabel: "系统异常")
+        case .interrupted:
+            return TaskChipStyle(color: .secondaryLabelColor, stateLabel: "已停止")
+        case .idle:
+            return TaskChipStyle(color: .secondaryLabelColor, stateLabel: "空闲")
+        case .connecting:
+            return TaskChipStyle(color: PetState.connecting.color, stateLabel: "连接中")
+        case .disconnected:
+            return TaskChipStyle(color: PetState.disconnected.color, stateLabel: "未连接")
         }
     }
 
-    private func runtimeLabel(for task: PetTaskStatus) -> String {
-        let start = task.startedAt ?? task.updatedAt
-        let elapsed = max(0, Int(Date().timeIntervalSince(start)))
-        let hours = elapsed / 3600
-        let minutes = (elapsed % 3600) / 60
-        let seconds = elapsed % 60
-        if hours > 0 {
-            return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        }
-        return String(format: "%02d:%02d", minutes, seconds)
-    }
-
-    private var summaryColor: NSColor {
-        if current.activeCount > 0 {
-            return NSColor(calibratedRed: 0.70, green: 0.86, blue: 0.92, alpha: 1)
-        }
-        return current.state.color
+    private func resizeTaskRail(preservingX offset: CGFloat) {
+        guard let taskScrollView, let taskStackView else { return }
+        taskStackView.needsLayout = true
+        taskStackView.layoutSubtreeIfNeeded()
+        let viewportSize = taskScrollView.contentSize
+        let width = max(taskStackView.fittingSize.width, viewportSize.width)
+        taskStackView.frame = NSRect(x: 0, y: 0, width: width, height: max(1, viewportSize.height))
+        let maximumOffset = max(0, width - viewportSize.width)
+        taskScrollView.contentView.scroll(to: NSPoint(x: min(max(0, offset), maximumOffset), y: 0))
+        taskScrollView.reflectScrolledClipView(taskScrollView.contentView)
     }
 
     private var connectionStatusLabel: String {
-        switch current.state {
-        case .disconnected:
-            return "● 未连接"
-        case .connecting:
-            return "● 连接中"
-        case .interrupted:
-            return "● 已停止"
-        case .systemError, .failed:
-            return "● 异常"
-        default:
-            return "● 在线"
-        }
+        current.connectionState.label
     }
 
     private var connectionColor: NSColor {
-        switch current.state {
-        case .disconnected:
-            return PetState.disconnected.color
-        case .interrupted:
-            return .secondaryLabelColor
-        case .systemError, .failed:
-            return .systemRed
-        case .connecting:
-            return PetState.connecting.color
-        default:
-            return current.activeCount > 0
-                ? PetState.working(nil).color
-                : .secondaryLabelColor
-        }
+        current.connectionState.color
     }
 
     private var statusColor: NSColor {
+        if current.connectionState == .stale || current.connectionState == .incompatible {
+            return current.connectionState.color
+        }
         // The aggregate state may retain a completed/failed sibling while a
         // different thread is still working. The visible work summary should
         // stay blue whenever there is active work.
@@ -485,24 +756,58 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         }
     }
 
+    private var compactBackgroundColor: NSColor {
+        current.connectionState.compactBackgroundColor ?? current.state.compactBackgroundColor
+    }
+
     private func face(for state: PetState, expanded: Bool = false) -> String {
         let core: String
+        let animatedFrame = effectiveMotion == .standard ? frameIndex : 0
         switch state {
         case .idle:
-            core = frameIndex % 9 == 0 ? "－ᴥ－" : "•ᴥ•"
+            core = animatedFrame > 0 && animatedFrame % 9 == 0 ? "－ᴥ－" : "•ᴥ•"
         case .working:
             let frames = ["•̀ᴥ•́", "•̀ᴥ•", "•̀ᴥ•́", "•ᴥ•́"]
-            core = frames[frameIndex % frames.count]
+            core = frames[animatedFrame % frames.count]
         case .connecting:
             let frames = ["•ᴥ•", "•ᴥ•·", "•ᴥ•··", "•ᴥ•···"]
-            core = frames[frameIndex % frames.count]
+            core = frames[animatedFrame % frames.count]
         case .completed:
-            let frames = ["ᵔᴥᵔ✦", "ᵔᴥᵔ✧"]
-            core = frames[frameIndex % frames.count]
+            core = animatedFrame > 0 && animatedFrame < AnimationFrameLimit.completed
+                ? "ᵔᴥᵔ✧"
+                : "ᵔᴥᵔ✦"
         default:
             core = state.compactFace
         }
         return expanded ? "ʕ\(core)ʔ" : core
+    }
+
+    private func syncTrayRegistration() {
+        guard let trayItem else { return }
+        if isExpanded {
+            trayRestoreWorkItem?.cancel()
+            trayRestoreWorkItem = nil
+            CTPAddSystemTrayItem(trayItem)
+        } else if settings.keepCompactPet {
+            scheduleTrayRestore()
+        } else {
+            trayRestoreWorkItem?.cancel()
+            trayRestoreWorkItem = nil
+            CTPRemoveSystemTrayItem(trayItem)
+        }
+    }
+
+    private func prepareStateCrossfade() {
+        let views = [trayButton, petImageView, petFallbackLabel, statusLabel, taskScrollView, connectionLabel]
+            .compactMap { $0 }
+        views.forEach { view in
+            view.wantsLayer = true
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.15
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            view.layer?.add(transition, forKey: "state-crossfade")
+        }
     }
 
     @objc private func activateCodex() {
@@ -512,5 +817,20 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    }
+
+    @objc private func openTask(_ sender: TaskChipButton) {
+        guard let deepLink = CodexThreadLink.url(threadID: sender.threadID),
+              let codexURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.openai.codex") else {
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.open(
+            [deepLink],
+            withApplicationAt: codexURL,
+            configuration: configuration,
+            completionHandler: nil
+        )
     }
 }

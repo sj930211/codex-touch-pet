@@ -3,29 +3,122 @@ import Foundation
 final class ThreadStatusStore {
     var onChange: ((AggregatePetStatus) -> Void)?
 
+    private let now: () -> Date
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let reconnectGracePeriod: TimeInterval
     private var statuses: [String: ThreadPetStatus] = [:]
     private var titles: [String: String] = [:]
+    private var turnStartedAt: [String: Date] = [:]
     private var transientGeneration: [String: UUID] = [:]
     private var activityGeneration: [String: UUID] = [:]
-    private var connected = false
+    private var connectionState: CodexConnectionState = .connecting
+    private var lastSuccessfulUpdateAt: Date?
+    private var lastDisconnectAt: Date?
+    private var connectionIssueCode: String?
+    private var filteredInternalCount: Int?
+    private var staleGeneration: UUID?
     private var initialScanComplete = false
+
+    init(
+        now: @escaping () -> Date = Date.init,
+        reconnectGracePeriod: TimeInterval = 8,
+        schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, action in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
+        }
+    ) {
+        self.now = now
+        self.reconnectGracePeriod = reconnectGracePeriod
+        self.schedule = schedule
+    }
 
     func setConnected(_ value: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
-        connected = value
-        if !value {
-            statuses.removeAll()
-            titles.removeAll()
-            transientGeneration.removeAll()
-            activityGeneration.removeAll()
-            initialScanComplete = false
+        if value {
+            markConnected()
+        } else {
+            markDisconnected(issueCode: "connection_closed")
         }
+    }
+
+    func beginConnecting() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard lastSuccessfulUpdateAt == nil else { return }
+        connectionState = .connecting
+        connectionIssueCode = nil
+        publish()
+    }
+
+    func markConnected() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        staleGeneration = nil
+        connectionState = .online
+        connectionIssueCode = nil
+        lastSuccessfulUpdateAt = now()
+        publish()
+    }
+
+    func markDisconnected(issueCode: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard connectionState != .incompatible else { return }
+        connectionIssueCode = issueCode
+        if lastSuccessfulUpdateAt == nil {
+            connectionState = .disconnected
+            if lastDisconnectAt == nil {
+                lastDisconnectAt = now()
+            }
+            publish()
+            return
+        }
+        if connectionState == .reconnecting || connectionState == .stale {
+            publish()
+            return
+        }
+        lastDisconnectAt = now()
+        connectionState = .reconnecting
+        let generation = UUID()
+        staleGeneration = generation
+        publish()
+        schedule(reconnectGracePeriod) { [weak self] in
+            guard let self, self.staleGeneration == generation else { return }
+            self.connectionState = .stale
+            self.publish()
+        }
+    }
+
+    func beginManualReconnect() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if connectionState == .online {
+            markDisconnected(issueCode: "manual_reconnect")
+            return
+        }
+        connectionIssueCode = "manual_reconnect"
+        if lastSuccessfulUpdateAt == nil {
+            connectionState = .connecting
+        } else {
+            connectionState = .reconnecting
+        }
+        publish()
+    }
+
+    func markIncompatible(issueCode: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        staleGeneration = nil
+        connectionState = .incompatible
+        connectionIssueCode = issueCode
+        lastDisconnectAt = now()
         publish()
     }
 
     func finishInitialScan() {
         dispatchPrecondition(condition: .onQueue(.main))
         initialScanComplete = true
+        recordSuccessfulUpdate()
+        publish()
+    }
+
+    func updateFilteredInternalCount(_ count: Int?) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        filteredInternalCount = count
         publish()
     }
 
@@ -33,6 +126,7 @@ final class ThreadStatusStore {
         dispatchPrecondition(condition: .onQueue(.main))
         statuses.removeValue(forKey: threadId)
         titles.removeValue(forKey: threadId)
+        turnStartedAt.removeValue(forKey: threadId)
         transientGeneration.removeValue(forKey: threadId)
         activityGeneration.removeValue(forKey: threadId)
         publish()
@@ -58,17 +152,22 @@ final class ThreadStatusStore {
 
     func updateRuntime(threadId: String, type: String, activeFlags: [String] = []) {
         dispatchPrecondition(condition: .onQueue(.main))
+        recordSuccessfulUpdate()
         transientGeneration.removeValue(forKey: threadId)
         activityGeneration.removeValue(forKey: threadId)
         let state: PetState
         switch type {
         case "notLoaded":
+            endTurn(threadId: threadId)
             state = .connecting
         case "idle":
+            endTurn(threadId: threadId)
             state = .idle
         case "systemError":
+            endTurn(threadId: threadId)
             state = .systemError
         case "active":
+            beginTurnIfNeeded(threadId: threadId)
             if activeFlags.contains("waitingOnApproval") {
                 state = .waitingApproval
             } else if activeFlags.contains("waitingOnUserInput") {
@@ -84,15 +183,21 @@ final class ThreadStatusStore {
 
     func updateTurn(threadId: String, status: String) {
         dispatchPrecondition(condition: .onQueue(.main))
+        recordSuccessfulUpdate()
         activityGeneration.removeValue(forKey: threadId)
         switch status {
         case "inProgress":
+            transientGeneration.removeValue(forKey: threadId)
+            beginTurnIfNeeded(threadId: threadId)
             setState(.working(nil), threadId: threadId)
         case "completed":
+            endTurn(threadId: threadId)
             setTransient(.completed, fallback: .idle, threadId: threadId, delay: 3)
         case "interrupted":
+            endTurn(threadId: threadId)
             setTransient(.interrupted, fallback: .idle, threadId: threadId, delay: 2)
         case "failed":
+            endTurn(threadId: threadId)
             transientGeneration.removeValue(forKey: threadId)
             setState(.failed, threadId: threadId)
         default:
@@ -102,6 +207,7 @@ final class ThreadStatusStore {
 
     func updateActivity(threadId: String, activity: WorkActivity) {
         dispatchPrecondition(condition: .onQueue(.main))
+        recordSuccessfulUpdate()
         guard let current = statuses[threadId]?.state else { return }
         switch current {
         case .working:
@@ -139,31 +245,44 @@ final class ThreadStatusStore {
 
     private func setState(_ state: PetState, threadId: String) {
         let previous = statuses[threadId]
-        let startedAt: Date?
-        if case .working = state {
-            if let previous,
-               case .working = previous.state {
-                startedAt = previous.startedAt ?? previous.updatedAt
-            } else {
-                startedAt = Date()
-            }
-        } else {
-            startedAt = nil
-        }
+        let timestamp = now()
         statuses[threadId] = ThreadPetStatus(
             threadId: threadId,
             state: state,
-            updatedAt: Date(),
+            updatedAt: timestamp,
             title: previous?.title ?? titles[threadId] ?? "",
-            startedAt: startedAt
+            startedAt: turnStartedAt[threadId]
         )
         publish()
+    }
+
+    private func beginTurnIfNeeded(threadId: String) {
+        if turnStartedAt[threadId] == nil {
+            turnStartedAt[threadId] = now()
+        }
+    }
+
+    private func endTurn(threadId: String) {
+        turnStartedAt.removeValue(forKey: threadId)
+    }
+
+    private func recordSuccessfulUpdate() {
+        lastSuccessfulUpdateAt = now()
+        if connectionState != .incompatible {
+            connectionState = .online
+            connectionIssueCode = nil
+            staleGeneration = nil
+        }
     }
 
     private func publish() {
         let value = PetStatusAggregator.aggregate(
             Array(statuses.values),
-            connected: connected,
+            connectionState: connectionState,
+            lastSuccessfulUpdateAt: lastSuccessfulUpdateAt,
+            lastDisconnectAt: lastDisconnectAt,
+            connectionIssueCode: connectionIssueCode,
+            filteredInternalCount: filteredInternalCount,
             initialScanComplete: initialScanComplete
         )
         onChange?(value)

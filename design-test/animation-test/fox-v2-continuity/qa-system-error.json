@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "frames_root": "/private/tmp/fox-system-error.7sEICP/frames",
+  "states": [
+    "running"
+  ],
+  "errors": [],
+  "warnings": [],
+  "rows": [
+    {
+      "state": "running",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 26925,
+          "bbox": [
+            5,
+            5,
+            187,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 25420,
+          "bbox": [
+            5,
+            10,
+            187,
+            198
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 22897,
+          "bbox": [
+            5,
+            15,
+            187,
+            193
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 18303,
+          "bbox": [
+            5,
+            31,
+            187,
+            177
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 25328,
+          "bbox": [
+            5,
+            13,
+            187,
+            195
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/fox-system-error.7sEICP/frames/running/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 23572,
+          "bbox": [
+            13,
+            5,
+            178,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        }
+      ]
+    }
+  ]
+}

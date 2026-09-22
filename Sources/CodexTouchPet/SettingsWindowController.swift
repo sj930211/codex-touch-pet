@@ -1,15 +1,25 @@
 import AppKit
 
 final class SettingsWindowController: NSWindowController {
-    private let onQuietModeChange: (Bool) -> Void
+    private let onSettingsChange: (AppSettings) -> Void
+    private var settings: AppSettings
+    private let autoExpandButton: NSButton
+    private let keepCompactPetButton: NSButton
     private let quietModeButton: NSButton
+    private let motionPopUpButton: NSPopUpButton
+    private let promptsButton: NSButton
 
-    init(quietMode: Bool, onQuietModeChange: @escaping (Bool) -> Void) {
-        self.onQuietModeChange = onQuietModeChange
-        self.quietModeButton = NSButton(checkboxWithTitle: "安静模式（不自动展开完整 Touch Bar）", target: nil, action: nil)
+    init(settings: AppSettings, onSettingsChange: @escaping (AppSettings) -> Void) {
+        self.settings = settings
+        self.onSettingsChange = onSettingsChange
+        self.autoExpandButton = NSButton(checkboxWithTitle: "Codex 在前台时自动展开", target: nil, action: nil)
+        self.keepCompactPetButton = NSButton(checkboxWithTitle: "收起后保留 Touch Bar 紧凑宠物", target: nil, action: nil)
+        self.quietModeButton = NSButton(checkboxWithTitle: "安静模式（临时停用自动展开和宠物动画）", target: nil, action: nil)
+        self.motionPopUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
+        self.promptsButton = NSButton(checkboxWithTitle: "播放完成与等待入场提示", target: nil, action: nil)
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 286),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 390),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -18,9 +28,14 @@ final class SettingsWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         super.init(window: window)
 
-        quietModeButton.target = self
-        quietModeButton.action = #selector(quietModeChanged)
-        quietModeButton.state = quietMode ? .on : .off
+        for button in [autoExpandButton, keepCompactPetButton, quietModeButton, promptsButton] {
+            button.target = self
+            button.action = #selector(settingChanged)
+        }
+        motionPopUpButton.addItems(withTitles: MotionPreference.allCases.map(\.title))
+        motionPopUpButton.target = self
+        motionPopUpButton.action = #selector(settingChanged)
+        updateControls()
         buildContent()
     }
 
@@ -34,8 +49,18 @@ final class SettingsWindowController: NSWindowController {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func quietModeChanged() {
-        onQuietModeChange(quietModeButton.state == .on)
+    func update(settings: AppSettings) {
+        self.settings = settings
+        updateControls()
+    }
+
+    @objc private func settingChanged() {
+        settings.autoExpand = autoExpandButton.state == .on
+        settings.keepCompactPet = keepCompactPetButton.state == .on
+        settings.quietMode = quietModeButton.state == .on
+        settings.motionPreference = MotionPreference.allCases[motionPopUpButton.indexOfSelectedItem]
+        settings.completionAndWaitingPrompts = promptsButton.state == .on
+        onSettingsChange(settings)
     }
 
     @objc private func closeWindow() {
@@ -49,16 +74,27 @@ final class SettingsWindowController: NSWindowController {
         title.font = .systemFont(ofSize: 18, weight: .semibold)
 
         let description = NSTextField(
-            wrappingLabelWithString: "Codex 在前台时自动展开完整面板；切到其他应用后保留窄宠物入口。多个活动任务只在摘要区轮播，不替代 Codex 详情页。"
+            wrappingLabelWithString: "Touch Bar 只显示状态汇总，不在此执行审批或输入。安静模式会临时覆盖自动展开和动效设置，关闭后恢复原偏好。"
         )
         description.font = .systemFont(ofSize: 13)
         description.textColor = .secondaryLabelColor
         description.maximumNumberOfLines = 0
         description.preferredMaxLayoutWidth = 420
 
-        let carousel = NSTextField(labelWithString: "任务摘要轮播：每 5 秒切换当前活动任务")
-        carousel.font = .systemFont(ofSize: 13)
-        carousel.textColor = .secondaryLabelColor
+        let motionLabel = NSTextField(labelWithString: "动效强度")
+        motionLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        let motionRow = NSStackView(views: [motionLabel, motionPopUpButton])
+        motionRow.orientation = .horizontal
+        motionRow.alignment = .centerY
+        motionRow.spacing = 12
+
+        let systemMotionHelp = NSTextField(
+            wrappingLabelWithString: "macOS “减少动态效果”对所有选项优先；“静态”仍保留颜色、文字和短淡变反馈。"
+        )
+        systemMotionHelp.font = .systemFont(ofSize: 12)
+        systemMotionHelp.textColor = .tertiaryLabelColor
+        systemMotionHelp.maximumNumberOfLines = 0
+        systemMotionHelp.preferredMaxLayoutWidth = 460
 
         let version = NSTextField(labelWithString: "版本 \(AppMetadata.version)（\(AppMetadata.build)）")
         version.font = .systemFont(ofSize: 12)
@@ -68,7 +104,18 @@ final class SettingsWindowController: NSWindowController {
         done.bezelStyle = .rounded
         done.keyEquivalent = "\r"
 
-        let stack = NSStackView(views: [title, description, quietModeButton, carousel, version, done])
+        let stack = NSStackView(views: [
+            title,
+            description,
+            autoExpandButton,
+            keepCompactPetButton,
+            quietModeButton,
+            motionRow,
+            systemMotionHelp,
+            promptsButton,
+            version,
+            done
+        ])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -82,5 +129,14 @@ final class SettingsWindowController: NSWindowController {
             stack.topAnchor.constraint(equalTo: contentView.topAnchor),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
+    }
+
+    private func updateControls() {
+        autoExpandButton.state = settings.autoExpand ? .on : .off
+        keepCompactPetButton.state = settings.keepCompactPet ? .on : .off
+        quietModeButton.state = settings.quietMode ? .on : .off
+        promptsButton.state = settings.completionAndWaitingPrompts ? .on : .off
+        let index = MotionPreference.allCases.firstIndex(of: settings.motionPreference) ?? 0
+        motionPopUpButton.selectItem(at: index)
     }
 }

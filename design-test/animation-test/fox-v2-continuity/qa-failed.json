@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "frames_root": "/private/tmp/fox-inspect-failed.s5HVia",
+  "states": [
+    "running"
+  ],
+  "errors": [],
+  "warnings": [],
+  "rows": [
+    {
+      "state": "running",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": null,
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 26086,
+          "bbox": [
+            7,
+            5,
+            185,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 1,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 20935,
+          "bbox": [
+            5,
+            18,
+            187,
+            189
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 2,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 19982,
+          "bbox": [
+            5,
+            21,
+            187,
+            187
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 3,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 18901,
+          "bbox": [
+            5,
+            24,
+            187,
+            183
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 4,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 19524,
+          "bbox": [
+            5,
+            22,
+            187,
+            185
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 5,
+          "file": "/private/tmp/fox-inspect-failed.s5HVia/running/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 20954,
+          "bbox": [
+            5,
+            17,
+            187,
+            191
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        }
+      ]
+    }
+  ]
+}

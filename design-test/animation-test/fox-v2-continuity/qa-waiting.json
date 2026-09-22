@@ -1,0 +1,112 @@
+{
+  "ok": true,
+  "frames_root": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames",
+  "states": [
+    "waiting"
+  ],
+  "errors": [],
+  "warnings": [],
+  "rows": [
+    {
+      "state": "waiting",
+      "expected_frames": 6,
+      "actual_frames": 6,
+      "extraction_method": "components",
+      "ok": true,
+      "errors": [],
+      "warnings": [],
+      "frames": [
+        {
+          "index": 0,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/00.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 25285,
+          "bbox": [
+            9,
+            5,
+            182,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 1,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/01.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 24620,
+          "bbox": [
+            11,
+            5,
+            180,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 2,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/02.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 24076,
+          "bbox": [
+            13,
+            5,
+            178,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 3,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/03.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 24165,
+          "bbox": [
+            12,
+            5,
+            179,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 4,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/04.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 24461,
+          "bbox": [
+            12,
+            5,
+            179,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        },
+        {
+          "index": 5,
+          "file": "/Users/shenjian/work/AI/\u9886\u57df\u5206\u7c7b/\u5b9e\u9645\u9879\u76ee/\u684c\u9762\u4e0e\u7cfb\u7edf\u5de5\u5177/codex-touchbar-poc/design-test/animation-test/fox-v2-continuity/frames/waiting/05.png",
+          "width": 192,
+          "height": 208,
+          "nontransparent_pixels": 24047,
+          "bbox": [
+            14,
+            5,
+            178,
+            203
+          ],
+          "edge_pixels": 0,
+          "chroma_adjacent_pixels": 0
+        }
+      ]
+    }
+  ]
+}

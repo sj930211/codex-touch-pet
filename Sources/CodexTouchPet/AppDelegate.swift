@@ -4,22 +4,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusStore = ThreadStatusStore()
     private lazy var ipcClient = CodexIPCClient(statusStore: statusStore)
     private let touchBarController = TouchBarController()
+    private let settingsStore = AppSettingsStore()
+    private var settings = AppSettings()
 
     private var statusItem: NSStatusItem?
     private var statusMenuItem: NSMenuItem?
     private var quietMenuItem: NSMenuItem?
     private var settingsWindowController: SettingsWindowController?
+    private var diagnosticsWindowController: DiagnosticsWindowController?
     private var signalSources: [DispatchSourceSignal] = []
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var latestAggregate = AggregatePetStatus(
+        state: .connecting,
+        connectionState: .connecting,
+        activeCount: 0,
+        waitingCount: 0,
+        trackedCount: 0
+    )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        settings = settingsStore.load()
+        touchBarController.applySettings(settings)
         configureMenuBar()
         configureSignals()
         configureWorkspaceObservers()
         statusStore.onChange = { [weak self] aggregate in
             self?.apply(aggregate)
         }
+        statusStore.beginConnecting()
         touchBarController.start()
         syncCodexActivation(NSWorkspace.shared.frontmostApplication)
         ipcClient.start()
@@ -40,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.toolTip = "Codex Touch Pet"
 
         let menu = NSMenu()
-        let statusMenuItem = NSMenuItem(title: "状态：正在连接", action: nil, keyEquivalent: "")
+        let statusMenuItem = NSMenuItem(title: "状态：连接中", action: nil, keyEquivalent: "")
         statusMenuItem.isEnabled = false
         menu.addItem(statusMenuItem)
 
@@ -51,6 +64,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         settingsItem.target = self
         menu.addItem(settingsItem)
+
+        let reconnectItem = NSMenuItem(
+            title: "重新连接 Codex",
+            action: #selector(reconnectIPC),
+            keyEquivalent: ""
+        )
+        reconnectItem.target = self
+        menu.addItem(reconnectItem)
+
+        let diagnosticsItem = NSMenuItem(
+            title: "诊断信息…",
+            action: #selector(showDiagnostics),
+            keyEquivalent: ""
+        )
+        diagnosticsItem.target = self
+        menu.addItem(diagnosticsItem)
 
         let usageItem = NSMenuItem(
             title: "使用说明",
@@ -88,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         quietItem.target = self
-        quietItem.state = .off
+        quietItem.state = settings.quietMode ? .on : .off
         menu.addItem(quietItem)
 
         let compatibilityTitle = touchBarController.isPrivateTouchBarAvailable
@@ -142,10 +171,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func apply(_ aggregate: AggregatePetStatus) {
         precondition(Thread.isMainThread)
+        latestAggregate = aggregate
         touchBarController.update(aggregate)
-        statusMenuItem?.title = "状态：\(aggregate.state.label)"
+        statusMenuItem?.title = "状态：\(menuStatusLabel(for: aggregate))"
         statusItem?.button?.image = statusImage(symbolName: menuBarSymbolName(for: aggregate.state))
-        statusItem?.button?.contentTintColor = aggregate.state.color
+        statusItem?.button?.contentTintColor = aggregate.connectionState == .online
+            ? aggregate.state.color
+            : aggregate.connectionState.color
+        diagnosticsWindowController?.update(snapshot: diagnosticSnapshot())
+    }
+
+    private func menuStatusLabel(for aggregate: AggregatePetStatus) -> String {
+        switch aggregate.connectionState {
+        case .online:
+            return aggregate.state.label
+        case .reconnecting where aggregate.activeCount > 0:
+            return "\(aggregate.state.label) · 正在重连"
+        default:
+            return aggregate.connectionState.diagnosticLabel
+        }
     }
 
     private func menuBarSymbolName(for state: PetState) -> String {
@@ -171,20 +215,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSettings() {
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(
-                quietMode: touchBarController.quietMode
-            ) { [weak self] enabled in
-                guard let self else { return }
-                self.touchBarController.setQuietMode(enabled)
-                self.quietMenuItem?.state = enabled ? .on : .off
+                settings: settings
+            ) { [weak self] newSettings in
+                self?.applySettings(newSettings)
             }
         }
+        settingsWindowController?.update(settings: settings)
         settingsWindowController?.present()
+    }
+
+    @objc private func showDiagnostics() {
+        let snapshot = diagnosticSnapshot()
+        if diagnosticsWindowController == nil {
+            diagnosticsWindowController = DiagnosticsWindowController(
+                snapshot: snapshot,
+                onReconnect: { [weak self] in self?.reconnectIPC() }
+            )
+        }
+        diagnosticsWindowController?.update(snapshot: snapshot)
+        diagnosticsWindowController?.present()
+    }
+
+    @objc private func reconnectIPC() {
+        statusStore.beginManualReconnect()
+        ipcClient.reconnect()
     }
 
     @objc private func showUsage() {
         let alert = NSAlert()
         alert.messageText = "Codex Touch Pet 使用说明"
-        alert.informativeText = "Touch Bar 只显示汇总：狐狸表示当前状态，右侧显示活动任务数量、当前任务缩略名和运行时间。切回 Codex 会自动展开完整面板，具体任务详情仍回到 Codex 查看。\n\n菜单栏可打开设置、切换安静模式，并查看当前连接状态。"
+        alert.informativeText = "Touch Bar 只显示汇总：狐狸表示当前状态。只有一项运行任务时，右侧显示任务缩略名和运行时间；多任务时只显示数量和最长运行时间。具体任务详情仍回到 Codex 查看。\n\n菜单栏可配置自动展开、紧凑宠物、安静模式、动效强度和完成/等待提示。"
         alert.addButton(withTitle: "完成")
         alert.runModal()
     }
@@ -201,9 +261,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggleQuietMode() {
-        let newValue = !touchBarController.quietMode
-        touchBarController.setQuietMode(newValue)
-        quietMenuItem?.state = newValue ? .on : .off
+        var newSettings = settings
+        newSettings.quietMode.toggle()
+        applySettings(newSettings)
+    }
+
+    private func applySettings(_ newSettings: AppSettings) {
+        settings = newSettings
+        settingsStore.save(newSettings)
+        touchBarController.applySettings(newSettings)
+        quietMenuItem?.state = newSettings.quietMode ? .on : .off
+        settingsWindowController?.update(settings: newSettings)
+    }
+
+    private func diagnosticSnapshot() -> DiagnosticSnapshot {
+        DiagnosticSnapshot(
+            codexRunning: !NSRunningApplication.runningApplications(
+                withBundleIdentifier: "com.openai.codex"
+            ).isEmpty,
+            connectionState: latestAggregate.connectionState,
+            lastSuccessfulUpdateAt: latestAggregate.lastSuccessfulUpdateAt,
+            activeCount: latestAggregate.activeCount,
+            waitingCount: latestAggregate.waitingCount,
+            trackedCount: latestAggregate.trackedCount,
+            filteredInternalCount: latestAggregate.filteredInternalCount,
+            touchBarAvailable: touchBarController.isPrivateTouchBarAvailable,
+            lastConnectionIssueAt: latestAggregate.lastDisconnectAt,
+            connectionIssueCode: latestAggregate.connectionIssueCode
+        )
     }
 
     @objc private func quit() {

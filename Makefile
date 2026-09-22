@@ -49,7 +49,7 @@ run-direct: app
 
 test-app:
 	mkdir -p "$(APP_BUILD_DIR)" "$(MODULE_CACHE_DIR)"
-	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/CodexThreadLink.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/ThreadStatusStore.swift Tests/SelfTest/main.swift -framework AppKit -o "$(APP_BUILD_DIR)/pet-state-tests"
+	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/CodexThreadLink.swift Sources/CodexTouchPet/PetIdleActivityDirector.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/ThreadStatusStore.swift Tests/SelfTest/main.swift -framework AppKit -o "$(APP_BUILD_DIR)/pet-state-tests"
 	"$(APP_BUILD_DIR)/pet-state-tests"
 
 clean:

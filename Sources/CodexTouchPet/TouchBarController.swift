@@ -38,8 +38,7 @@ private final class TaskChipButton: NSButton {
 final class TouchBarController: NSObject, NSTouchBarDelegate {
     private enum Identifier {
         static let tray = NSTouchBarItem.Identifier("dev.codex.touch-pet.tray")
-        static let pet = NSTouchBarItem.Identifier("dev.codex.touch-pet.pet")
-        static let status = NSTouchBarItem.Identifier("dev.codex.touch-pet.status")
+        static let content = NSTouchBarItem.Identifier("dev.codex.touch-pet.content")
     }
 
     let isPrivateTouchBarAvailable = CTPPrivateTouchBarAvailable()
@@ -50,8 +49,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private var trayButton: NSButton?
     private var petLabel: NSTextField?
     private var petImageView: NSImageView?
+    private var petImageCenterXConstraint: NSLayoutConstraint?
     private var petFallbackLabel: NSTextField?
-    private var statusLabel: NSTextField?
     private var taskScrollView: NSScrollView?
     private var taskStackView: NSStackView?
     private var connectionLabel: NSTextField?
@@ -70,8 +69,17 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         trackedCount: 0
     )
     private var frameIndex = 0
+    private var lastAnimationAdvanceAt: CFTimeInterval = 0
+    private var idleActivityDirector = PetIdleActivityDirector()
+    private var idleMotion = PetIdleActivityDirector.Motion(
+        activity: .wander,
+        x: 0,
+        y: 0,
+        rotation: 0,
+        scale: 1.08
+    )
     private var isExpanded = false
-    private var codexIsActive = false
+    private(set) var codexIsActive = false
 
     private struct PetMotion {
         let scale: CGFloat
@@ -103,23 +111,25 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
         let touchBar = NSTouchBar()
         touchBar.delegate = self
-        touchBar.defaultItemIdentifiers = [
-            Identifier.pet,
-            Identifier.status
-        ]
-        touchBar.principalItemIdentifier = Identifier.pet
+        // Keep the expanded UI in one item. macOS may place sibling custom
+        // items outside the visible modal area when one of them is principal;
+        // a single container keeps the task rail attached to the pet.
+        touchBar.defaultItemIdentifiers = [Identifier.content]
+        touchBar.principalItemIdentifier = Identifier.content
         self.touchBar = touchBar
 
-        let trayItem = NSCustomTouchBarItem(identifier: Identifier.tray)
-        let trayButton = NSButton(title: "🐾", target: self, action: #selector(toggleExpanded))
-        trayButton.bezelColor = compactBackgroundColor
-        trayItem.view = trayButton
+        let trayItem = makeTrayItem()
         self.trayItem = trayItem
-        self.trayButton = trayButton
+        // Register immediately at launch; the delayed path is only a recovery
+        // for modal/app-activation transitions.
+        CTPAddSystemTrayItem(trayItem)
         syncTrayRegistration()
 
         animationTimer = Timer.scheduledTimer(
-            timeInterval: 0.10,
+            // Tick the director frequently, but advance artwork at a slower,
+            // state-specific cadence. This avoids the old 600ms six-frame
+            // loop that looked like a fast flicker on the Touch Bar.
+            timeInterval: 1.0 / 30.0,
             target: self,
             selector: #selector(advanceAnimation),
             userInfo: nil,
@@ -135,6 +145,15 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             showExpanded()
             scheduleCollapse(after: configuredWelcomeDuration)
         }
+    }
+
+    private func makeTrayItem() -> NSCustomTouchBarItem {
+        let item = NSCustomTouchBarItem(identifier: Identifier.tray)
+        let button = NSButton(title: "🐾", target: self, action: #selector(toggleExpanded))
+        configureTrayButton(button)
+        item.view = button
+        trayButton = button
+        return item
     }
 
     func stop() {
@@ -166,6 +185,9 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         current = status
         if stateChanged {
             frameIndex = 0
+            lastAnimationAdvanceAt = 0
+            idleActivityDirector.reset()
+            idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1.08)
         }
         updateViews()
     }
@@ -229,113 +251,119 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         _ touchBar: NSTouchBar,
         makeItemForIdentifier identifier: NSTouchBarItem.Identifier
     ) -> NSTouchBarItem? {
-        switch identifier {
-        case Identifier.pet:
-            let item = NSCustomTouchBarItem(identifier: identifier)
-            let container = NSView()
-            let imageView = NSImageView()
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.imageAlignment = .alignCenter
-            imageView.toolTip = "Codex Touch Bar Pet"
-            imageView.translatesAutoresizingMaskIntoConstraints = false
+        guard identifier == Identifier.content else { return nil }
 
-            let fallback = NSTextField(labelWithString: face(for: current.state, expanded: true))
-            fallback.alignment = .center
-            fallback.font = .systemFont(ofSize: 19, weight: .medium)
-            fallback.textColor = statusColor
-            fallback.toolTip = "Codex Touch Bar Pet"
-            fallback.translatesAutoresizingMaskIntoConstraints = false
+        let item = NSCustomTouchBarItem(identifier: identifier)
+        let container = NSView()
+        let petView = makeExpandedPetView()
+        let statusView = makeExpandedStatusView()
+        petView.translatesAutoresizingMaskIntoConstraints = false
+        statusView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(petView)
+        container.addSubview(statusView)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 620),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
+            container.heightAnchor.constraint(equalToConstant: 30),
+            petView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            petView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            petView.widthAnchor.constraint(equalToConstant: 220),
+            petView.heightAnchor.constraint(equalToConstant: 30),
+            statusView.leadingAnchor.constraint(equalTo: petView.trailingAnchor, constant: 8),
+            statusView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            statusView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            statusView.heightAnchor.constraint(equalToConstant: 30)
+        ])
+        item.view = container
+        return item
+    }
 
-            container.addSubview(imageView)
-            container.addSubview(fallback)
-            NSLayoutConstraint.activate([
-                container.widthAnchor.constraint(equalToConstant: 48),
-                container.heightAnchor.constraint(equalToConstant: 30),
-                imageView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                imageView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                imageView.topAnchor.constraint(equalTo: container.topAnchor),
-                imageView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                fallback.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                fallback.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                fallback.topAnchor.constraint(equalTo: container.topAnchor),
-                fallback.bottomAnchor.constraint(equalTo: container.bottomAnchor)
-            ])
+    private func makeExpandedPetView() -> NSView {
+        let container = NSView()
+        let imageView = NSImageView()
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.imageAlignment = .alignCenter
+        imageView.toolTip = "Codex Touch Bar Pet"
+        imageView.translatesAutoresizingMaskIntoConstraints = false
 
-            petImageView = imageView
-            petFallbackLabel = fallback
-            petLabel = fallback
-            item.view = container
-            return item
+        let fallback = NSTextField(labelWithString: face(for: current.state, expanded: true))
+        fallback.alignment = .center
+        fallback.font = .systemFont(ofSize: 19, weight: .medium)
+        fallback.textColor = statusColor
+        fallback.toolTip = "Codex Touch Bar Pet"
+        fallback.translatesAutoresizingMaskIntoConstraints = false
 
-        case Identifier.status:
-            let item = NSCustomTouchBarItem(identifier: identifier)
-            let container = NSView()
-            let primary = NSTextField(labelWithString: primaryStatusLabel)
-            primary.alignment = .left
-            primary.font = .systemFont(ofSize: 13, weight: .semibold)
-            primary.textColor = .white
-            primary.setContentHuggingPriority(.required, for: .horizontal)
-            primary.setContentCompressionResistancePriority(.required, for: .horizontal)
-            primary.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(imageView)
+        container.addSubview(fallback)
+        NSLayoutConstraint.activate([
+            imageView.widthAnchor.constraint(equalToConstant: 48),
+            imageView.heightAnchor.constraint(equalToConstant: 30),
+            imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            fallback.widthAnchor.constraint(equalToConstant: 48),
+            fallback.heightAnchor.constraint(equalToConstant: 30),
+            fallback.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            fallback.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+        ])
+        let imageCenterConstraint = imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor)
+        imageCenterConstraint.isActive = true
+        petImageCenterXConstraint = imageCenterConstraint
+        petImageView = imageView
+        petFallbackLabel = fallback
+        petLabel = fallback
+        return container
+    }
 
-            let taskScroll = NSScrollView()
-            taskScroll.drawsBackground = false
-            taskScroll.borderType = .noBorder
-            taskScroll.hasHorizontalScroller = false
-            taskScroll.hasVerticalScroller = false
-            taskScroll.autohidesScrollers = true
-            taskScroll.horizontalScrollElasticity = .automatic
-            taskScroll.verticalScrollElasticity = .none
-            taskScroll.scrollerStyle = .overlay
-            taskScroll.translatesAutoresizingMaskIntoConstraints = false
+    private func makeExpandedStatusView() -> NSView {
+        let container = NSView()
+        let taskScroll = NSScrollView()
+        taskScroll.drawsBackground = false
+        taskScroll.borderType = .noBorder
+        taskScroll.hasHorizontalScroller = false
+        taskScroll.hasVerticalScroller = false
+        taskScroll.autohidesScrollers = true
+        taskScroll.horizontalScrollElasticity = .automatic
+        taskScroll.verticalScrollElasticity = .none
+        taskScroll.scrollerStyle = .overlay
+        taskScroll.translatesAutoresizingMaskIntoConstraints = false
 
-            let taskStack = NSStackView()
-            taskStack.orientation = .horizontal
-            taskStack.alignment = .centerY
-            taskStack.distribution = .fill
-            taskStack.spacing = 6
-            taskStack.edgeInsets = NSEdgeInsets(top: 1, left: 0, bottom: 1, right: 10)
-            taskStack.frame = NSRect(x: 0, y: 0, width: 1, height: 28)
-            taskScroll.documentView = taskStack
+        let taskStack = NSStackView()
+        taskStack.orientation = .horizontal
+        taskStack.alignment = .centerY
+        // Do not let the stack stretch a single capsule across the whole
+        // viewport; extra space belongs to horizontal scrolling, not the
+        // task button itself.
+        taskStack.distribution = .equalSpacing
+        taskStack.spacing = 6
+        taskStack.edgeInsets = NSEdgeInsets(top: 1, left: 0, bottom: 1, right: 10)
+        taskStack.frame = NSRect(x: 0, y: 0, width: 1, height: 28)
+        taskScroll.documentView = taskStack
 
-            let connection = NSTextField(labelWithString: connectionStatusLabel)
-            connection.alignment = .right
-            connection.font = .systemFont(ofSize: 11, weight: .medium)
-            connection.lineBreakMode = .byTruncatingTail
-            connection.setContentHuggingPriority(.required, for: .horizontal)
-            connection.setContentCompressionResistancePriority(.required, for: .horizontal)
-            connection.translatesAutoresizingMaskIntoConstraints = false
+        let connection = NSTextField(labelWithString: connectionStatusLabel)
+        connection.alignment = .right
+        connection.font = .systemFont(ofSize: 11, weight: .medium)
+        connection.lineBreakMode = .byTruncatingTail
+        connection.setContentHuggingPriority(.required, for: .horizontal)
+        connection.setContentCompressionResistancePriority(.required, for: .horizontal)
+        connection.translatesAutoresizingMaskIntoConstraints = false
 
-            container.addSubview(primary)
-            container.addSubview(taskScroll)
-            container.addSubview(connection)
-            let preferredWidth = container.widthAnchor.constraint(equalToConstant: 540)
-            preferredWidth.priority = .defaultHigh
-            NSLayoutConstraint.activate([
-                preferredWidth,
-                container.widthAnchor.constraint(greaterThanOrEqualToConstant: 420),
-                container.heightAnchor.constraint(equalToConstant: 30),
-                primary.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
-                primary.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                taskScroll.leadingAnchor.constraint(equalTo: primary.trailingAnchor, constant: 10),
-                taskScroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
-                taskScroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1),
-                taskScroll.trailingAnchor.constraint(equalTo: connection.leadingAnchor, constant: -8),
-                connection.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-                connection.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-                connection.widthAnchor.constraint(equalToConstant: 58)
-            ])
-            statusLabel = primary
-            taskScrollView = taskScroll
-            taskStackView = taskStack
-            connectionLabel = connection
-            rebuildTaskRailIfNeeded(force: true)
-            item.view = container
-            return item
-
-        default:
-            return nil
-        }
+        container.addSubview(taskScroll)
+        container.addSubview(connection)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 392),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
+            taskScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
+            taskScroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
+            taskScroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1),
+            taskScroll.trailingAnchor.constraint(equalTo: connection.leadingAnchor, constant: -8),
+            connection.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            connection.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            connection.widthAnchor.constraint(equalToConstant: 58)
+        ])
+        taskScrollView = taskScroll
+        taskStackView = taskStack
+        connectionLabel = connection
+        rebuildTaskRailIfNeeded(force: true)
+        return container
     }
 
     @objc private func toggleExpanded() {
@@ -354,9 +382,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         guard let touchBar else { return }
         collapseTimer?.invalidate()
         collapseTimer = nil
-        // Keep the pet in Control Strip when the full panel is hidden. A
-        // dismiss removes the system-modal session entirely; minimize returns
-        // it to the registered tray item, matching the manual close behavior.
+        // Minimize first so macOS returns to the Control Strip transition, then
+        // re-register a fresh compact item after the modal session settles.
         if settings.keepCompactPet {
             CTPMinimizeSystemModalTouchBar(touchBar)
         } else {
@@ -377,8 +404,11 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
                   !self.isExpanded,
-                  self.settings.keepCompactPet,
-                  let trayItem = self.trayItem else { return }
+                  self.settings.keepCompactPet else { return }
+            // Re-add the same item after dismissing a modal session. Removing
+            // and recreating it can leave the Control Strip cache with a
+            // stale item that is registered but not rendered.
+            guard let trayItem = self.trayItem else { return }
             CTPAddSystemTrayItem(trayItem)
         }
         trayRestoreWorkItem = workItem
@@ -394,12 +424,20 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     @objc private func advanceAnimation() {
+        let now = CACurrentMediaTime()
+        let interval = animationFrameInterval
+        let shouldAdvanceFrame = lastAnimationAdvanceAt == 0 || now - lastAnimationAdvanceAt >= interval
+        if shouldAdvanceFrame {
+            lastAnimationAdvanceAt = now
+        }
         if shouldAdvancePetAnimation {
-            if artwork.animationLoops(for: current.state),
-               let frameCount = artwork.animationFrameCount(for: current.state) {
-                frameIndex = (frameIndex + 1) % frameCount
-            } else {
-                frameIndex += 1
+            if shouldAdvanceFrame {
+                if artwork.animationLoops(for: current.state),
+                   let frameCount = artwork.animationFrameCount(for: current.state) {
+                    frameIndex = (frameIndex + 1) % frameCount
+                } else {
+                    frameIndex += 1
+                }
             }
         }
         updatePetArtwork()
@@ -407,12 +445,9 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
     private func updateViews() {
         updatePetArtwork()
-        trayButton?.bezelColor = compactBackgroundColor
-        trayButton?.contentTintColor = nil
+        if let trayButton { configureTrayButton(trayButton) }
         petLabel?.stringValue = face(for: current.state, expanded: true)
         petLabel?.textColor = statusColor
-        statusLabel?.stringValue = primaryStatusLabel
-        statusLabel?.textColor = statusColor
         rebuildTaskRailIfNeeded()
         connectionLabel?.stringValue = connectionStatusLabel
         connectionLabel?.textColor = connectionColor
@@ -431,6 +466,55 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         petImageView?.image = animatedImage
         petImageView?.isHidden = image == nil
         petFallbackLabel?.isHidden = image != nil
+        updatePetActivityPosition()
+    }
+
+    private func configureTrayButton(_ button: NSButton) {
+        // The compact entry follows the square system control-strip treatment;
+        // task chips remain capsules in the expanded task rail.
+        button.isBordered = false
+        button.bezelStyle = .texturedSquare
+        button.wantsLayer = true
+        button.layer?.cornerRadius = 0
+        button.layer?.masksToBounds = true
+        button.layer?.backgroundColor = compactBackgroundColor.cgColor
+        button.contentTintColor = nil
+        button.imageScaling = .scaleProportionallyUpOrDown
+    }
+
+    private var animationFrameInterval: CFTimeInterval {
+        switch current.state {
+        case .idle:
+            return 0.24
+        case .working:
+            return 0.16
+        case .connecting, .disconnected:
+            return 0.20
+        case .waitingApproval, .waitingInput:
+            return 0.22
+        case .completed, .failed, .systemError, .interrupted:
+            return 0.18
+        }
+    }
+
+    private func updatePetActivityPosition() {
+        guard let constraint = petImageCenterXConstraint else { return }
+        guard current.state == .idle,
+              current.activeCount == 0,
+              current.waitingCount == 0,
+              effectiveMotion == .standard else {
+            idleActivityDirector.reset()
+            idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1.08)
+            constraint.constant = 0
+            petImageView?.superview?.needsLayout = true
+            return
+        }
+        idleMotion = idleActivityDirector.motion(
+            at: CACurrentMediaTime(),
+            travel: 76
+        )
+        constraint.constant = idleMotion.x
+        petImageView?.superview?.needsLayout = true
     }
 
     private func animatedPetImage(_ image: NSImage) -> NSImage {
@@ -466,7 +550,15 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             return PetMotion(scale: 1.10, x: 0, y: 0, rotation: 0, opacity: 1)
         }
         switch current.state {
-        case .idle, .interrupted, .disconnected:
+        case .idle:
+            return PetMotion(
+                scale: idleMotion.scale,
+                x: 0,
+                y: idleMotion.y / 30,
+                rotation: idleMotion.rotation,
+                opacity: 1
+            )
+        case .interrupted, .disconnected:
             let frames: [PetMotion] = [
                 PetMotion(scale: 1.08, x: 0, y: -0.006, rotation: 0, opacity: 1),
                 PetMotion(scale: 1.10, x: 0, y: 0, rotation: -0.7, opacity: 1),
@@ -567,23 +659,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         }
     }
 
-    private var primaryStatusLabel: String {
-        switch current.connectionState {
-        case .stale:
-            return "状态过期"
-        case .incompatible:
-            return "不兼容"
-        case .disconnected where current.tasks.isEmpty:
-            return "未连接"
-        default:
-            break
-        }
-        if current.activeCount > 0 {
-            return "工作中"
-        }
-        return current.state.label
-    }
-
     private var taskRailFallbackLabel: String {
         switch current.connectionState {
         case .stale:
@@ -594,8 +669,10 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             return "等待 Codex 启动"
         case .connecting, .reconnecting:
             return "连接中"
+        case .online where current.state == .idle && current.activeCount == 0 && current.waitingCount == 0:
+            return ""
         default:
-            return "等待新任务"
+            return ""
         }
     }
 
@@ -631,7 +708,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
                 state: $0.state.animationIdentity
             )
         }
-        let fallback = snapshots.isEmpty ? taskRailFallbackLabel : nil
+        let fallbackText = snapshots.isEmpty ? taskRailFallbackLabel : ""
+        let fallback = fallbackText.isEmpty ? nil : fallbackText
         guard force || snapshots != renderedTaskChips || fallback != renderedTaskFallback else { return }
 
         let previousOffset = taskScrollView.contentView.bounds.origin.x
@@ -640,8 +718,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             view.removeFromSuperview()
         }
 
-        if snapshots.isEmpty {
-            let label = NSTextField(labelWithString: fallback ?? "等待新任务")
+        if snapshots.isEmpty, let fallback {
+            let label = NSTextField(labelWithString: fallback)
             label.font = .systemFont(ofSize: 11, weight: .regular)
             label.textColor = .secondaryLabelColor
             label.lineBreakMode = .byTruncatingTail
@@ -681,14 +759,16 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         button.contentTintColor = NSColor(calibratedWhite: 0.96, alpha: 1)
         button.alignment = .center
         button.lineBreakMode = .byTruncatingTail
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         button.toolTip = "\(snapshot.fullTitle) · \(style.stateLabel)"
         button.setAccessibilityLabel("\(snapshot.fullTitle)，\(style.stateLabel)")
         button.applyCapsuleStyle(accentColor: style.color)
         button.translatesAutoresizingMaskIntoConstraints = false
+        let width = min(112, max(64, button.intrinsicContentSize.width))
         NSLayoutConstraint.activate([
             button.heightAnchor.constraint(equalToConstant: 26),
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
-            button.widthAnchor.constraint(lessThanOrEqualToConstant: 112)
+            button.widthAnchor.constraint(equalToConstant: width)
         ])
         return button
     }
@@ -798,7 +878,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private func prepareStateCrossfade() {
-        let views = [trayButton, petImageView, petFallbackLabel, statusLabel, taskScrollView, connectionLabel]
+        let views = [trayButton, petImageView, petFallbackLabel, taskScrollView, connectionLabel]
             .compactMap { $0 }
         views.forEach { view in
             view.wantsLayer = true

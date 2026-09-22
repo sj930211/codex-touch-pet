@@ -211,6 +211,29 @@ expect(
     "Idle diagnostics must retain the anonymous filtered-internal count"
 )
 
+var idleDirector = PetIdleActivityDirector()
+let idleOffsets = stride(from: 0.0, through: 14.0, by: 0.05).map { time in
+    idleDirector.offset(at: time, travel: 42)
+}
+expect(idleOffsets.allSatisfy { abs($0) <= 42.001 }, "Idle activity must stay inside its travel bounds")
+expect(idleOffsets.contains(where: { abs($0) > 1 }), "Idle activity must leave the center over time")
+expect(
+    zip(idleOffsets, idleOffsets.dropFirst()).allSatisfy { abs($1 - $0) < 2.5 },
+    "Idle activity must move continuously without jumps"
+)
+var contextualDirector = PetIdleActivityDirector()
+let contextualMotions = stride(from: 0.0, through: 36.0, by: 0.1).map { time in
+    contextualDirector.motion(at: time, travel: 42, date: now)
+}
+expect(
+    contextualMotions.allSatisfy { abs($0.x) <= 42.001 && abs($0.y) <= 2.001 && abs($0.rotation) <= 2.001 },
+    "Contextual idle motion must stay bounded"
+)
+expect(
+    Set(contextualMotions.map(\.activity)).count >= 2,
+    "Contextual idle motion must select more than one preset activity"
+)
+
 var healthClock = now
 var scheduledHealthActions: [() -> Void] = []
 var healthStatus: AggregatePetStatus?
@@ -276,6 +299,9 @@ expect(latestStatus?.tasks.first?.startedAt == firstTurnStart, "Resuming the sam
 clock = now.addingTimeInterval(48)
 runtimeStore.updateTurn(threadId: "runtime", status: "completed")
 expect(latestStatus?.tasks.first?.startedAt == nil, "A completed turn must stop its timer")
+let completionState = latestStatus?.state
+runtimeStore.updateTurn(threadId: "runtime", status: "completed")
+expect(latestStatus?.state == completionState, "Repeated terminal events must not replay completion state")
 
 clock = now.addingTimeInterval(60)
 runtimeStore.updateTurn(threadId: "runtime", status: "inProgress")

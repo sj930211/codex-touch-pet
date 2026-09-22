@@ -9,6 +9,7 @@ final class ThreadStatusStore {
     private var statuses: [String: ThreadPetStatus] = [:]
     private var titles: [String: String] = [:]
     private var turnStartedAt: [String: Date] = [:]
+    private var lastTurnStatus: [String: String] = [:]
     private var transientGeneration: [String: UUID] = [:]
     private var activityGeneration: [String: UUID] = [:]
     private var connectionState: CodexConnectionState = .connecting
@@ -127,6 +128,7 @@ final class ThreadStatusStore {
         statuses.removeValue(forKey: threadId)
         titles.removeValue(forKey: threadId)
         turnStartedAt.removeValue(forKey: threadId)
+        lastTurnStatus.removeValue(forKey: threadId)
         transientGeneration.removeValue(forKey: threadId)
         activityGeneration.removeValue(forKey: threadId)
         publish()
@@ -168,6 +170,7 @@ final class ThreadStatusStore {
             state = .systemError
         case "active":
             beginTurnIfNeeded(threadId: threadId)
+            lastTurnStatus[threadId] = "inProgress"
             if activeFlags.contains("waitingOnApproval") {
                 state = .waitingApproval
             } else if activeFlags.contains("waitingOnUserInput") {
@@ -185,6 +188,13 @@ final class ThreadStatusStore {
         dispatchPrecondition(condition: .onQueue(.main))
         recordSuccessfulUpdate()
         activityGeneration.removeValue(forKey: threadId)
+        // Snapshot replay and re-subscription can deliver the same terminal
+        // event more than once. Keep the first terminal transition observable
+        // so completion/failure animations are not replayed.
+        if lastTurnStatus[threadId] == status, status != "inProgress" {
+            return
+        }
+        lastTurnStatus[threadId] = status
         switch status {
         case "inProgress":
             transientGeneration.removeValue(forKey: threadId)

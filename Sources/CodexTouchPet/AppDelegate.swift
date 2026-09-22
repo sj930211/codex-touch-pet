@@ -1,4 +1,5 @@
 import AppKit
+import CoreGraphics
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let statusStore = ThreadStatusStore()
@@ -22,6 +23,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trackedCount: 0
     )
 
+    private let codexBundleIdentifier = "com.openai.codex"
+    // ToDesk may remain focused on another display while Codex is the visible
+    // application on the primary display. NSWorkspace exposes only one global
+    // frontmost application, so treating this auxiliary activation as a Codex
+    // exit would incorrectly collapse the full Touch Bar panel.
+    private let auxiliaryDisplayBundleIdentifiers = ["com.youqu.todesk.mac"]
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         settings = settingsStore.load()
@@ -35,6 +43,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusStore.beginConnecting()
         touchBarController.start()
         syncCodexActivation(NSWorkspace.shared.frontmostApplication)
+        // The accessory app can finish launching before the previously active
+        // Codex window is reported by NSWorkspace. Re-check once after the
+        // activation transaction settles so the full panel is not left
+        // collapsed on a multi-display setup.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self else { return }
+            self.syncCodexActivation(NSWorkspace.shared.frontmostApplication)
+        }
         ipcClient.start()
     }
 
@@ -165,8 +181,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func syncCodexActivation(_ application: NSRunningApplication?) {
-        let isCodexActive = application?.bundleIdentifier == "com.openai.codex"
+        // Launching or activating this accessory app can emit an activation
+        // notification of its own while the user is still looking at Codex.
+        // Treating that transient event as "Codex left" immediately collapses
+        // the freshly expanded Touch Bar, especially in multi-display setups.
+        if application?.bundleIdentifier == Bundle.main.bundleIdentifier {
+            return
+        }
+        let bundleIdentifier = application?.bundleIdentifier
+        let isCodexActive: Bool
+        if bundleIdentifier == codexBundleIdentifier {
+            isCodexActive = true
+        } else if let bundleIdentifier,
+                  auxiliaryDisplayBundleIdentifiers.contains(bundleIdentifier) {
+            // Keep Codex expanded when the other display is occupied by a
+            // remote-control client. If startup happened while ToDesk was the
+            // global frontmost app, use the primary-display window check to
+            // recover the Codex state as well.
+            isCodexActive = hasVisibleCodexWindowOnPrimaryDisplay()
+                || touchBarController.codexIsActive
+        } else {
+            isCodexActive = false
+        }
         touchBarController.handleCodexActivation(isActive: isCodexActive)
+    }
+
+    private func hasVisibleCodexWindowOnPrimaryDisplay() -> Bool {
+        let primaryBounds = CGDisplayBounds(CGMainDisplayID())
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID)
+                as? [[String: Any]] else {
+            return false
+        }
+
+        for window in windows {
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+                  NSRunningApplication(processIdentifier: ownerPID)?.bundleIdentifier == codexBundleIdentifier,
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0,
+                  let alpha = window[kCGWindowAlpha as String] as? Double,
+                  alpha > 0.01,
+                  let boundsDictionary = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary as CFDictionary),
+                  bounds.width >= 300,
+                  bounds.height >= 200 else {
+                continue
+            }
+            if bounds.intersection(primaryBounds).isNull == false {
+                return true
+            }
+        }
+        return false
     }
 
     private func apply(_ aggregate: AggregatePetStatus) {

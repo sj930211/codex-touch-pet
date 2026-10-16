@@ -13,7 +13,7 @@ APP_PACKAGE_BUNDLE := $(APP_PACKAGE_DIR)/Codex Touch Pet.app
 APP_FOX_RESOURCES := Resources/Fox
 SWIFT_SOURCES := $(wildcard Sources/CodexTouchPet/*.swift)
 
-.PHONY: all probe app package run-app run-direct test-app clean
+.PHONY: all probe app package run-app run-direct test-app test-assets test-idle test-interface clean
 
 all: selector-probe touchbar-pet-poc
 
@@ -34,6 +34,7 @@ app:
 	cp "App/Info.plist" "$(APP_BUNDLE)/Contents/Info.plist"
 	mkdir -p "$(APP_BUNDLE)/Contents/Resources/Fox"
 	cp "$(APP_FOX_RESOURCES)"/*.png "$(APP_BUNDLE)/Contents/Resources/Fox/"
+	cp "App/AppIcon.png" "$(APP_BUNDLE)/Contents/Resources/AppIcon.png"
 	cp README.md "$(APP_BUNDLE)/Contents/Resources/README.md"
 	cp NOTICE.txt "$(APP_BUNDLE)/Contents/Resources/NOTICE.txt"
 	codesign --force --sign - "$(APP_BUNDLE)"
@@ -47,10 +48,24 @@ run-app: app
 run-direct: app
 	"$(APP_EXECUTABLE)"
 
-test-app:
+test-assets:
 	mkdir -p "$(APP_BUILD_DIR)" "$(MODULE_CACHE_DIR)"
-	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/CodexThreadLink.swift Sources/CodexTouchPet/PetIdleActivityDirector.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/ThreadStatusStore.swift Tests/SelfTest/main.swift -framework AppKit -o "$(APP_BUILD_DIR)/pet-state-tests"
+	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Tests/AssetSelfTest/main.swift -framework CoreGraphics -framework ImageIO -o "$(APP_BUILD_DIR)/fox-asset-tests"
+	cd "$(CURDIR)" && "$(APP_BUILD_DIR)/fox-asset-tests"
+
+test-app: test-assets
+	mkdir -p "$(APP_BUILD_DIR)" "$(MODULE_CACHE_DIR)"
+	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/CodexThreadLink.swift Sources/CodexTouchPet/PetActivityLayout.swift Sources/CodexTouchPet/PetIdleActivityDirector.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/ThreadStatusStore.swift Tests/SelfTest/main.swift -framework AppKit -o "$(APP_BUILD_DIR)/pet-state-tests"
 	"$(APP_BUILD_DIR)/pet-state-tests"
+
+test-interface:
+	mkdir -p "$(APP_BUILD_DIR)" "$(MODULE_CACHE_DIR)"
+	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 Sources/CodexTouchPet/AppMetadata.swift Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/MenuBarPresentation.swift Sources/CodexTouchPet/SettingsWindowController.swift Tests/InterfaceSelfTest/main.swift -framework AppKit -o "$(APP_BUILD_DIR)/pet-interface-tests"
+	"$(APP_BUILD_DIR)/pet-interface-tests"
+
+test-idle: app
+	$(SWIFTC) $(SWIFT_MODULE_CACHE_FLAGS) -sdk "$(SDK)" -target arm64-apple-macosx13.0 -import-objc-header Sources/TouchBarPrivate/include/TouchBarPrivate.h Sources/CodexTouchPet/AppSettings.swift Sources/CodexTouchPet/CodexThreadLink.swift Sources/CodexTouchPet/PetActivityLayout.swift Sources/CodexTouchPet/PetIdleActivityDirector.swift Sources/CodexTouchPet/PetState.swift Sources/CodexTouchPet/PetArtwork.swift Sources/CodexTouchPet/TouchBarController.swift Tests/IdlePlayfieldSelfTest/main.swift "$(APP_BUILD_DIR)/TouchBarPrivate.o" -framework AppKit -o "$(APP_BUILD_DIR)/pet-idle-tests"
+	"$(APP_BUILD_DIR)/pet-idle-tests"
 
 clean:
 	rm -f selector-probe touchbar-pet-poc

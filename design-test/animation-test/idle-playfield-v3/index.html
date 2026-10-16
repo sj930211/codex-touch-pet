@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>狐狸空闲活动预览</title>
+<style>
+  :root { color-scheme:dark; font:15px/1.65 -apple-system,BlinkMacSystemFont,sans-serif; background:#111215; color:#ececf0 }
+  body { max-width:1080px; margin:64px auto; padding:0 28px }
+  h1 { font-size:28px; font-weight:600; letter-spacing:-.5px; margin-bottom:8px }
+  p { color:#aaaeb8; max-width:760px }
+  nav { display:flex; gap:8px; flex-wrap:wrap; margin:28px 0 20px }
+  button { font:inherit; color:#aaaeb8; background:#1d1f24; border:1px solid #353840; border-radius:8px; padding:8px 18px; cursor:pointer }
+  button[aria-pressed="true"] { color:#fff; border-color:#7e9be0; background:#253248 }
+  button:active { transform:scale(.98) }
+  button:focus-visible { outline:2px solid #a7befe; outline-offset:3px }
+  video { display:block; width:100%; min-height:100px; background:#000; border:1px solid #353840; border-radius:4px }
+  #steps { margin-top:16px; color:#e3e6ed }
+  small { color:#898e99 }
+</style>
+<h1>狐狸空闲活动预览</h1>
+<p>使用应用里的动作素材、调度器和播放时钟生成。空闲时活动区为 528pt，右侧保留连接状态。以下是离线模拟，实际 Touch Bar 的大小和观感需要真机确认。</p>
+<nav aria-label="选择活动">
+  <button aria-pressed="true" data-src="explore.mp4" data-steps="跑到一侧 → 观察 → 跑到另一侧 → 伸展 → 停顿">跨区探索</button>
+  <button aria-pressed="false" data-src="shuttle.mp4" data-steps="跑到一侧 → 观察 → 折返另一侧 → 观察 → 回到中间休息">边缘折返</button>
+  <button aria-pressed="false" data-src="hopAndPlay.mp4" data-steps="跑到活动点 → 跳跃 → 落脚停顿 → 再跳 → 换位置玩尾巴">跑后连跳</button>
+  <button aria-pressed="false" data-src="tailGame.mp4" data-steps="跑到一侧 → 玩尾巴 → 观察 → 跑到另一侧 → 再玩 → 休息">跑动玩尾巴</button>
+</nav>
+<video controls muted loop playsinline preload="metadata" src="explore.mp4" aria-label="当前狐狸活动动画"></video>
+<p id="steps">跑到一侧 → 观察 → 跑到另一侧 → 伸展 → 停顿</p>
+<small>点选活动后开始播放，可暂停或拖动逐段查看。预览按 30fps 输出，实际应用随机选择活动并保持左右朝向与运动方向一致。</small>
+<script>
+  const player = document.querySelector('video');
+  document.querySelectorAll('nav button').forEach(button => button.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    player.src = button.dataset.src;
+    document.getElementById('steps').textContent = button.dataset.steps;
+    player.play().catch(() => {});
+  }));
+</script>
+</html>

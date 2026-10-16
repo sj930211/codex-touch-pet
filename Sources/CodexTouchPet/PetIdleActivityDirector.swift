@@ -1,18 +1,38 @@
 import CoreGraphics
 import Foundation
 
-/// A bounded local behavior director for the idle pet.
-///
-/// This is intentionally not an LLM call. It gives the pet an organic,
-/// interruptible wander while idle without adding network traffic, latency,
-/// or an unbounded animation loop. A future AI policy can replace the choice
-/// of targets while keeping this motion/guardrail layer intact.
+/// Selects grounded idle routines from existing fox poses. Only running moves
+/// the horizontal anchor; gestures stay at the place where the fox arrived.
 struct PetIdleActivityDirector {
+    enum RunDirection: Hashable {
+        case left
+        case right
+    }
+
     enum Activity: Hashable {
         case wander
         case inspect
         case stretch
         case nap
+        case run
+        case jump
+        case play
+
+        var frameInterval: TimeInterval {
+            switch self {
+            case .run: return 0.12
+            case .jump, .play, .wander: return 0.18
+            case .inspect, .stretch: return 0.24
+            case .nap: return 0.28
+            }
+        }
+    }
+
+    enum Routine: String, CaseIterable {
+        case explore
+        case shuttle
+        case hopAndPlay
+        case tailGame
     }
 
     struct Motion: Equatable {
@@ -21,97 +41,199 @@ struct PetIdleActivityDirector {
         let y: CGFloat
         let rotation: CGFloat
         let scale: CGFloat
+        let direction: RunDirection
+        let segmentID: Int
+        let routine: Routine?
+        let routineID: Int
+        let elapsed: TimeInterval
+
+        init(
+            activity: Activity,
+            x: CGFloat,
+            y: CGFloat,
+            rotation: CGFloat,
+            scale: CGFloat,
+            direction: RunDirection = .right,
+            segmentID: Int = 0,
+            routine: Routine? = nil,
+            routineID: Int = 0,
+            elapsed: TimeInterval = 0
+        ) {
+            self.activity = activity
+            self.x = x
+            self.y = y
+            self.rotation = rotation
+            self.scale = scale
+            self.direction = direction
+            self.segmentID = segmentID
+            self.routine = routine
+            self.routineID = routineID
+            self.elapsed = elapsed
+        }
     }
 
-    private var seed: UInt64 = 0xC0D3_5EED
+    private struct Segment {
+        let activity: Activity
+        let destination: CGFloat?
+        let duration: TimeInterval
+
+        static func run(to destination: CGFloat) -> Segment {
+            Segment(activity: .run, destination: destination, duration: 0)
+        }
+
+        static func hold(_ activity: Activity, for duration: TimeInterval) -> Segment {
+            Segment(activity: activity, destination: nil, duration: duration)
+        }
+    }
+
+    private var seed: UInt64
     private var currentX: CGFloat = 0
     private var targetX: CGFloat = 0
+    private var lastOffset: CGFloat = 0
     private var currentActivity: Activity = .wander
+    private var runDirection: RunDirection = .right
+    private var currentRoutine: Routine?
+    private var pendingSegments: [Segment] = []
+    private var segmentID = 0
+    private var routineID = 0
     private var segmentStartedAt: TimeInterval?
     private var segmentDuration: TimeInterval = 2.4
+    private var lastSampleAt: TimeInterval?
+    private let restScale: TimeInterval
+
+    init(actionThresholdScale: TimeInterval? = nil, seed: UInt64? = nil) {
+        let demoEnabled = ProcessInfo.processInfo.environment["CODEX_TOUCH_PET_ACTIONS_FAST"] == "1"
+        restScale = max(0.25, actionThresholdScale ?? (demoEnabled ? 0.5 : 1))
+        self.seed = max(1, seed ?? UInt64.random(in: 1...UInt64.max))
+    }
 
     mutating func reset() {
         currentX = 0
         targetX = 0
+        lastOffset = 0
         currentActivity = .wander
+        runDirection = .right
+        currentRoutine = nil
+        pendingSegments.removeAll(keepingCapacity: true)
+        segmentID = 0
+        routineID = 0
         segmentStartedAt = nil
         segmentDuration = 2.4
+        lastSampleAt = nil
     }
 
     mutating func motion(at time: TimeInterval, travel: CGFloat, date: Date = Date()) -> Motion {
         let hour = Calendar.current.component(.hour, from: date)
         let night = hour < 7 || hour >= 22
-        let offset = self.offset(at: time, travel: travel, nightBias: night)
-        let phase = segmentPhase(at: time)
-        let activity = currentActivity
-        switch activity {
-        case .wander:
-            return Motion(activity: activity, x: offset, y: 0, rotation: 0, scale: 1.08)
-        case .inspect:
-            return Motion(
-                activity: activity,
-                x: offset * 0.65,
-                y: -0.8 * CGFloat(sin(phase * .pi * 2)),
-                rotation: CGFloat(sin(phase * .pi * 2)) * 1.5,
-                scale: 1.10
-            )
-        case .stretch:
-            return Motion(
-                activity: activity,
-                x: offset * 0.35,
-                y: CGFloat(sin(phase * .pi)) * 1.4,
-                rotation: CGFloat(sin(phase * .pi * 2)) * 1.0,
-                scale: 1.08 + CGFloat(sin(phase * .pi)) * 0.04
-            )
-        case .nap:
-            let breathing = CGFloat(sin(phase * .pi * 2))
-            return Motion(activity: activity, x: offset * 0.15, y: breathing * 0.5, rotation: 0, scale: night ? 1.06 : 1.08)
-        }
+        let x = offset(at: time, travel: travel, nightBias: night)
+        // Jump/play sprites already contain vertical pose changes. Translating
+        // the image view again would make the fox float or clip.
+        return Motion(
+            activity: currentActivity,
+            x: x,
+            y: 0,
+            rotation: 0,
+            scale: 1,
+            direction: runDirection,
+            segmentID: segmentID,
+            routine: currentRoutine,
+            routineID: routineID,
+            elapsed: max(0, time - (segmentStartedAt ?? time))
+        )
     }
 
     mutating func offset(at time: TimeInterval, travel: CGFloat, nightBias: Bool = false) -> CGFloat {
         guard travel > 0 else { return 0 }
         if segmentStartedAt == nil {
             segmentStartedAt = time
-            segmentDuration = 1.8 + nextUnit() * 2.4
+            segmentDuration = 2.4 * restScale
         }
 
-        let segmentStart = segmentStartedAt ?? time
-        if time >= segmentStart + segmentDuration {
+        if let lastSampleAt, time - lastSampleAt > 0.5 {
+            // Freeze the whole segment clock, not just its position. This
+            // preserves a mid-jump pose instead of replaying the takeoff.
+            segmentStartedAt = (segmentStartedAt ?? time) + time - lastSampleAt
+        }
+        lastSampleAt = time
+
+        if time >= (segmentStartedAt ?? time) + segmentDuration {
             currentX = targetX
-            // Keep the center clear most of the time, but let the pet make
-            // short, non-repeating excursions into the available blank area.
-            targetX = CGFloat(nextUnit() * 2 - 1) * travel
-            currentActivity = nextActivity(nightBias: nightBias)
+            if pendingSegments.isEmpty {
+                pendingSegments = nextRoutine(nightBias: nightBias)
+            }
+            let next = pendingSegments.removeFirst()
+            currentActivity = next.activity
+            targetX = next.destination.map { min(travel, max(-travel, $0 * travel)) } ?? currentX
+            runDirection = targetX < currentX ? .left : .right
+            segmentDuration = next.activity == .run
+                ? runDuration(nightBias: nightBias)
+                : next.duration
             segmentStartedAt = time
-            segmentDuration = 1.8 + nextUnit() * 2.4
+            segmentID += 1
         }
 
-        let elapsed = min(segmentDuration, max(0, time - (segmentStartedAt ?? time)))
-        let progress = min(1, elapsed / max(0.01, segmentDuration))
+        let progress = min(1, max(0, (time - (segmentStartedAt ?? time)) / max(0.01, segmentDuration)))
         let eased = progress * progress * (3 - 2 * progress)
-        // Rebase the segment when a target is chosen so movement remains
-        // continuous instead of snapping when the next idle activity starts.
-        return currentX + (targetX - currentX) * CGFloat(eased)
+        lastOffset = currentX + (targetX - currentX) * CGFloat(eased)
+        return lastOffset
     }
 
-    private func segmentPhase(at time: TimeInterval) -> Double {
-        guard let segmentStartedAt else { return 0 }
-        return min(1, max(0, (time - segmentStartedAt) / max(0.01, segmentDuration)))
+    private func runDuration(nightBias: Bool) -> TimeInterval {
+        let speed: CGFloat = nightBias ? 75 : 110
+        // Larger playfields receive longer runs rather than faster sprites.
+        return max(1.6, Double(abs(targetX - currentX) / speed))
     }
 
-    private mutating func nextActivity(nightBias: Bool) -> Activity {
-        let value = nextUnit()
-        if nightBias { return value < 0.70 ? .nap : .inspect }
-        if value < 0.45 { return .wander }
-        if value < 0.70 { return .inspect }
-        if value < 0.88 { return .stretch }
-        return .nap
+    private mutating func nextRoutine(nightBias: Bool) -> [Segment] {
+        let candidates = Routine.allCases.filter { $0 != currentRoutine }
+        let index = min(candidates.count - 1, Int(nextUnit() * Double(candidates.count)))
+        let routine = candidates[index]
+        currentRoutine = routine
+        routineID += 1
+        let side: CGFloat = nextUnit() < 0.5 ? -1 : 1
+        let rest = (2.2 + nextUnit() * 2.0) * restScale * (nightBias ? 1.7 : 1)
+        switch routine {
+        case .explore:
+            return [
+                .run(to: side * 0.94),
+                .hold(.inspect, for: 1.8),
+                .run(to: -side * 0.94),
+                .hold(.stretch, for: 1.8),
+                .hold(.wander, for: rest)
+            ]
+        case .shuttle:
+            return [
+                .run(to: side * 0.90),
+                .hold(.inspect, for: 1.4),
+                .run(to: -side * 0.90),
+                .hold(.inspect, for: 1.4),
+                .run(to: 0),
+                .hold(.nap, for: rest)
+            ]
+        case .hopAndPlay:
+            return [
+                .run(to: side * 0.70),
+                .hold(.jump, for: 1.6),
+                .hold(.wander, for: 0.5),
+                .hold(.jump, for: 1.6),
+                .run(to: -side * 0.35),
+                .hold(.play, for: 1.8),
+                .hold(.wander, for: rest)
+            ]
+        case .tailGame:
+            return [
+                .run(to: side * 0.84),
+                .hold(.play, for: 1.8),
+                .hold(.inspect, for: 1.4),
+                .run(to: -side * 0.72),
+                .hold(.play, for: 1.8),
+                .hold(.nap, for: rest)
+            ]
+        }
     }
 
     private mutating func nextUnit() -> Double {
-        // xorshift64*: deterministic, allocation-free, and sufficient for a
-        // small visual behavior director. It is not used for security.
+        // xorshift64*: tiny state and reproducible with an injected test seed.
         seed ^= seed >> 12
         seed ^= seed << 25
         seed ^= seed >> 27

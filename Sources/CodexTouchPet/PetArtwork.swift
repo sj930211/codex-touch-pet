@@ -7,19 +7,56 @@ final class PetArtwork {
     private struct AnimationSpec {
         let resourceName: String
         let loops: Bool
+        let frameCount: Int
+        let pingPong: Bool
+        /// Optional curated source-frame order for small Touch Bar sizes.
+        /// Some generated look-around rows are semantically useful but their
+        /// widest head turns read as lateral wobble when reduced to ~30px.
+        let frameSequence: [Int]?
+
+        var playbackFrameCount: Int {
+            if let frameSequence {
+                return frameSequence.count
+            }
+            guard pingPong, frameCount > 1 else { return frameCount }
+            return frameCount * 2 - 2
+        }
     }
 
     private var cache: [String: NSImage] = [:]
     private var frameCache: [String: [NSImage]] = [:]
 
-    private let animatedFrameCount = 6
+    private let semanticFrameCount = 6
+    private let actionFrameCount = 8
 
     func image(for state: PetState) -> NSImage? {
         image(for: state, frameIndex: 0)
     }
 
     func image(for state: PetState, frameIndex: Int) -> NSImage? {
-        if let animation = animationSpec(for: state),
+        image(for: state, activity: nil, frameIndex: frameIndex)
+    }
+
+    func image(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        frameIndex: Int
+    ) -> NSImage? {
+        image(
+            for: state,
+            activity: activity,
+            direction: .right,
+            frameIndex: frameIndex
+        )
+    }
+
+    func image(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        direction: PetIdleActivityDirector.RunDirection,
+        frameIndex: Int
+    ) -> NSImage? {
+        if let animation = animationSpec(for: state, activity: activity, direction: direction),
            let frame = loadFrame(animation: animation, index: frameIndex) {
             return frame
         }
@@ -52,47 +89,137 @@ final class PetArtwork {
     }
 
     func hasAnimatedFrames(for state: PetState) -> Bool {
-        guard let animation = animationSpec(for: state) else { return false }
-        return loadFrames(named: animation.resourceName)?.count == animatedFrameCount
+        hasAnimatedFrames(for: state, activity: nil)
+    }
+
+    func hasAnimatedFrames(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        direction: PetIdleActivityDirector.RunDirection = .right
+    ) -> Bool {
+        guard let animation = animationSpec(for: state, activity: activity, direction: direction) else { return false }
+        return loadFrames(named: animation.resourceName, count: animation.frameCount)?.count == animation.frameCount
     }
 
     func animationFrameCount(for state: PetState) -> Int? {
-        hasAnimatedFrames(for: state) ? animatedFrameCount : nil
+        animationFrameCount(for: state, activity: nil)
+    }
+
+    func animationFrameCount(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        direction: PetIdleActivityDirector.RunDirection = .right
+    ) -> Int? {
+        guard let animation = animationSpec(for: state, activity: activity, direction: direction),
+              hasAnimatedFrames(for: state, activity: activity, direction: direction) else {
+            return nil
+        }
+        return animation.playbackFrameCount
     }
 
     func animationLoops(for state: PetState) -> Bool {
-        animationSpec(for: state)?.loops == true
+        animationLoops(for: state, activity: nil)
     }
 
-    private func animationSpec(for state: PetState) -> AnimationSpec? {
+    func animationLoops(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        direction: PetIdleActivityDirector.RunDirection = .right
+    ) -> Bool {
+        animationSpec(for: state, activity: activity, direction: direction)?.loops == true
+    }
+
+    private func animationSpec(
+        for state: PetState,
+        activity: PetIdleActivityDirector.Activity?,
+        direction: PetIdleActivityDirector.RunDirection
+    ) -> AnimationSpec? {
+        if state == .idle, let activity {
+            switch activity {
+            case .run:
+                let resourceName = direction == .left ? "fox-idle-run-left" : "fox-idle-run-right"
+                return AnimationSpec(resourceName: resourceName, loops: true, frameCount: actionFrameCount, pingPong: false, frameSequence: nil)
+            case .jump:
+                return AnimationSpec(resourceName: "fox-idle-jump", loops: false, frameCount: actionFrameCount, pingPong: false, frameSequence: nil)
+            case .play:
+                return AnimationSpec(resourceName: "fox-idle-play", loops: false, frameCount: actionFrameCount, pingPong: false, frameSequence: nil)
+            case .inspect:
+                return AnimationSpec(
+                    resourceName: "fox-connecting", loops: true,
+                    frameCount: semanticFrameCount, pingPong: false,
+                    frameSequence: [0, 0, 3, 3, 5, 5, 3, 3]
+                )
+            case .stretch:
+                return AnimationSpec(
+                    resourceName: "fox-completed", loops: false,
+                    frameCount: semanticFrameCount, pingPong: false, frameSequence: nil
+                )
+            case .nap:
+                return AnimationSpec(
+                    resourceName: "fox-idle", loops: true,
+                    frameCount: semanticFrameCount, pingPong: false,
+                    frameSequence: [0, 2, 3, 3, 3, 3, 3, 4, 5, 0]
+                )
+            case .wander:
+                break
+            }
+        }
         switch state {
         case .idle:
-            return AnimationSpec(resourceName: "fox-idle", loops: true)
+            return AnimationSpec(
+                resourceName: "fox-idle", loops: true,
+                frameCount: semanticFrameCount, pingPong: false,
+                frameSequence: [0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            )
         case .working:
-            return AnimationSpec(resourceName: "fox-working", loops: true)
+            return AnimationSpec(resourceName: "fox-working", loops: true, frameCount: semanticFrameCount, pingPong: true, frameSequence: nil)
         case .waitingApproval:
-            return AnimationSpec(resourceName: "fox-waiting-approval", loops: true)
+            return AnimationSpec(resourceName: "fox-waiting-approval", loops: true, frameCount: semanticFrameCount, pingPong: true, frameSequence: nil)
         case .waitingInput:
-            return AnimationSpec(resourceName: "fox-waiting-input", loops: true)
+            // Keep the centered asking pose and its blink. The outer head-tilt
+            // frames are too wide at Touch Bar scale and look like wobble.
+            return AnimationSpec(
+                resourceName: "fox-waiting-input",
+                loops: true,
+                frameCount: semanticFrameCount,
+                pingPong: false,
+                frameSequence: [2, 2, 3, 3, 2, 2]
+            )
         case .completed:
-            return AnimationSpec(resourceName: "fox-completed", loops: false)
+            return AnimationSpec(resourceName: "fox-completed", loops: false, frameCount: semanticFrameCount, pingPong: false, frameSequence: nil)
         case .failed:
-            return AnimationSpec(resourceName: "fox-failed", loops: false)
+            return AnimationSpec(resourceName: "fox-failed", loops: false, frameCount: semanticFrameCount, pingPong: false, frameSequence: nil)
         case .systemError:
-            return AnimationSpec(resourceName: "fox-system-error", loops: false)
+            return AnimationSpec(resourceName: "fox-system-error", loops: false, frameCount: semanticFrameCount, pingPong: false, frameSequence: nil)
         case .connecting:
-            return AnimationSpec(resourceName: "fox-connecting", loops: true)
+            // Retain a restrained scan without visiting the two widest turns.
+            return AnimationSpec(
+                resourceName: "fox-connecting",
+                loops: true,
+                frameCount: semanticFrameCount,
+                pingPong: false,
+                frameSequence: [0, 3, 3, 5, 5, 3]
+            )
         case .interrupted:
-            return AnimationSpec(resourceName: "fox-interrupted", loops: false)
+            return AnimationSpec(resourceName: "fox-interrupted", loops: false, frameCount: semanticFrameCount, pingPong: false, frameSequence: nil)
         case .disconnected:
-            return AnimationSpec(resourceName: "fox-disconnected", loops: true)
+            // Use the quiet centered poses; the disconnected state should not
+            // continuously scan side to side while it is waiting to reconnect.
+            return AnimationSpec(
+                resourceName: "fox-disconnected",
+                loops: true,
+                frameCount: semanticFrameCount,
+                pingPong: false,
+                frameSequence: [0, 1, 1, 4, 5, 5]
+            )
         }
     }
 
-    private func loadFrames(named name: String) -> [NSImage]? {
-        if let cachedFrames = frameCache[name] { return cachedFrames }
+    private func loadFrames(named name: String, count: Int) -> [NSImage]? {
+        let cacheKey = "\(name)#\(count)"
+        if let cachedFrames = frameCache[cacheKey] { return cachedFrames }
         var frames: [NSImage] = []
-        for frameIndex in 0..<animatedFrameCount {
+        for frameIndex in 0..<count {
             guard let url = resourceURL(named: "\(name)-\(String(format: "%02d", frameIndex))"),
                   let image = NSImage(contentsOf: url) else {
                 break
@@ -100,18 +227,26 @@ final class PetArtwork {
             image.isTemplate = false
             frames.append(image)
         }
-        guard frames.count == animatedFrameCount else { return nil }
-        frameCache[name] = frames
+        guard frames.count == count else { return nil }
+        frameCache[cacheKey] = frames
         return frames
     }
 
     private func loadFrame(animation: AnimationSpec, index: Int) -> NSImage? {
-        guard let frames = loadFrames(named: animation.resourceName), !frames.isEmpty else {
+        guard let frames = loadFrames(named: animation.resourceName, count: animation.frameCount), !frames.isEmpty else {
             return nil
         }
         let frameIndex: Int
         if animation.loops {
-            frameIndex = ((index % frames.count) + frames.count) % frames.count
+            let cycleLength = animation.playbackFrameCount
+            let position = ((index % cycleLength) + cycleLength) % cycleLength
+            if let frameSequence = animation.frameSequence {
+                frameIndex = frameSequence[position]
+            } else if animation.pingPong, position >= frames.count {
+                frameIndex = cycleLength - position
+            } else {
+                frameIndex = position
+            }
         } else {
             frameIndex = min(max(index, 0), frames.count - 1)
         }

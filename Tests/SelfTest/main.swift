@@ -211,28 +211,104 @@ expect(
     "Idle diagnostics must retain the anonymous filtered-internal count"
 )
 
-var idleDirector = PetIdleActivityDirector()
-let idleOffsets = stride(from: 0.0, through: 14.0, by: 0.05).map { time in
-    idleDirector.offset(at: time, travel: 42)
+let daytime = Calendar.current.date(bySettingHour: 12, minute: 0, second: 0, of: now) ?? now
+let nighttime = Calendar.current.date(bySettingHour: 23, minute: 0, second: 0, of: now) ?? now
+let idleTravel = PetActivityLayout.travel(wideIdle: true)
+expect(PetActivityLayout.statusWidth(wideIdle: true) >= 82, "Online status must remain visible beside wide idle playfield")
+expect(PetActivityLayout.statusWidth(wideIdle: false) >= 390, "Task rail must retain its usable width")
+expect(idleTravel >= 230, "The empty idle layout must provide a wide playfield")
+
+var wideRangeDirector = PetIdleActivityDirector(seed: 0xC0D3_5EED)
+let wideRangeMotions = stride(from: 0.0, through: 240.0, by: 1.0 / 30).map { time in
+    wideRangeDirector.motion(at: time, travel: idleTravel, date: daytime)
 }
-expect(idleOffsets.allSatisfy { abs($0) <= 42.001 }, "Idle activity must stay inside its travel bounds")
-expect(idleOffsets.contains(where: { abs($0) > 1 }), "Idle activity must leave the center over time")
+let visitedX = wideRangeMotions.map(\.x)
+let visitedSpan = (visitedX.max() ?? 0) - (visitedX.min() ?? 0)
+expect(visitedSpan >= 400, "Idle pet must traverse most of the empty expanded Touch Bar")
 expect(
-    zip(idleOffsets, idleOffsets.dropFirst()).allSatisfy { abs($1 - $0) < 2.5 },
-    "Idle activity must move continuously without jumps"
+    wideRangeMotions.prefix(60).allSatisfy { abs($0.x) < 0.01 },
+    "Idle entry must settle briefly before the first routine"
 )
-var contextualDirector = PetIdleActivityDirector()
-let contextualMotions = stride(from: 0.0, through: 36.0, by: 0.1).map { time in
-    contextualDirector.motion(at: time, travel: 42, date: now)
+expect(
+    wideRangeMotions.prefix(240).contains { abs($0.x) > 30 },
+    "The first visible excursion must start within eight seconds"
+)
+expect(
+    Set(wideRangeMotions.compactMap(\.routine)).count == 4,
+    "An idle session must show all four activity routines"
+)
+expect(
+    Set(wideRangeMotions.map(\.activity)).isSuperset(of: [.run, .jump, .play, .inspect, .stretch, .nap]),
+    "Routines must include running, jumping, tail play, inspection and recovery"
+)
+
+var seenRoutines: [PetIdleActivityDirector.Routine] = []
+var lastRoutineID = 0
+var jumpSegments = Set<Int>()
+for (previous, motion) in zip(wideRangeMotions, wideRangeMotions.dropFirst()) {
+    expect(abs(motion.x) <= idleTravel + 0.001, "Idle motion must stay inside its playfield")
+    expect(abs(motion.x - previous.x) <= 5.6, "Idle position must remain continuous at 30Hz")
+    expect(motion.y == 0 && motion.rotation == 0, "Sprite actions must not receive a second floating transform")
+    if previous.segmentID == motion.segmentID {
+        let delta = motion.x - previous.x
+        if motion.activity == .run, abs(delta) > 0.001 {
+            expect(
+                (delta < 0 && motion.direction == .left) || (delta > 0 && motion.direction == .right),
+                "Running artwork must face the direction of travel"
+            )
+        } else if motion.activity != .run {
+            expect(abs(delta) < 0.001, "Gestures must stay grounded at their arrival position")
+        }
+    }
+    if let routine = motion.routine, motion.routineID != lastRoutineID {
+        seenRoutines.append(routine)
+        lastRoutineID = motion.routineID
+    }
+    if motion.activity == .jump { jumpSegments.insert(motion.segmentID) }
 }
+expect(jumpSegments.count >= 2, "Repeated jump actions must be separate replayable segments")
+expect(seenRoutines.count >= 8, "Idle play must continue after the first round")
 expect(
-    contextualMotions.allSatisfy { abs($0.x) <= 42.001 && abs($0.y) <= 2.001 && abs($0.rotation) <= 2.001 },
-    "Contextual idle motion must stay bounded"
+    zip(seenRoutines, seenRoutines.dropFirst()).allSatisfy { $0 != $1 },
+    "The dispatcher must not immediately repeat the same routine"
 )
-expect(
-    Set(contextualMotions.map(\.activity)).count >= 2,
-    "Contextual idle motion must select more than one preset activity"
-)
+
+for seed in 1...8 {
+    var director = PetIdleActivityDirector(seed: UInt64(seed))
+    var previous = director.motion(at: 0, travel: idleTravel, date: daytime)
+    for time in stride(from: 1.0 / 30, through: 180.0, by: 1.0 / 30) {
+        let motion = director.motion(at: time, travel: idleTravel, date: seed % 2 == 0 ? nighttime : daytime)
+        expect(abs(motion.x) <= idleTravel + 0.001, "Seeded day/night routines must remain bounded")
+        expect(abs(motion.x - previous.x) <= 5.6, "Random routine boundaries must not teleport")
+        previous = motion
+    }
+}
+
+var resumedDirector = PetIdleActivityDirector(seed: 9)
+var lastVisible = resumedDirector.motion(at: 0, travel: idleTravel, date: daytime)
+for time in stride(from: 1.0 / 30, through: 4.0, by: 1.0 / 30) {
+    lastVisible = resumedDirector.motion(at: time, travel: idleTravel, date: daytime)
+}
+let resumed = resumedDirector.motion(at: 124, travel: idleTravel, date: daytime)
+expect(abs(resumed.x - lastVisible.x) < 0.001, "A suspended timer must resume at the last visible position")
+expect(resumed.segmentID == lastVisible.segmentID && abs(resumed.elapsed - lastVisible.elapsed) < 0.001, "Suspension must preserve the running segment clock")
+resumedDirector.reset()
+let resetMotion = resumedDirector.motion(at: 125, travel: idleTravel, date: daytime)
+expect(resetMotion.x == 0 && resetMotion.activity == .wander, "Task interruption/reset must restore the centered idle entry")
+
+var jumpResumeDirector = PetIdleActivityDirector(seed: 0xC0D3_5EED)
+var sampledMidJump = false
+for time in stride(from: 0.0, through: 120.0, by: 1.0 / 30) {
+    let motion = jumpResumeDirector.motion(at: time, travel: idleTravel, date: daytime)
+    guard motion.activity == .jump, motion.elapsed >= 0.5 else { continue }
+    let afterSleep = jumpResumeDirector.motion(at: time + 120, travel: idleTravel, date: daytime)
+    expect(afterSleep.activity == .jump && afterSleep.segmentID == motion.segmentID, "Sleep must not restart or discard an in-flight jump")
+    expect(abs(afterSleep.elapsed - motion.elapsed) < 0.001 && abs(afterSleep.x - motion.x) < 0.001, "Sleep must preserve both jump pose time and anchor")
+    sampledMidJump = true
+    break
+}
+expect(sampledMidJump, "The suspension regression must actually sample an in-flight jump")
+print("PET_IDLE_ROUTINES_OK (4 routines, span=\(Int(visitedSpan))pt, 8 day/night seeds)")
 
 var healthClock = now
 var scheduledHealthActions: [() -> Void] = []

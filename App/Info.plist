@@ -10,6 +10,8 @@
     <string>CodexTouchPet</string>
     <key>CFBundleIdentifier</key>
     <string>dev.codex.touch-pet</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon.png</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

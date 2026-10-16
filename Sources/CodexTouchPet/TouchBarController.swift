@@ -50,6 +50,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private var petLabel: NSTextField?
     private var petImageView: NSImageView?
     private var petImageCenterXConstraint: NSLayoutConstraint?
+    private var petImageCenterYConstraint: NSLayoutConstraint?
+    private var petAreaWidthConstraint: NSLayoutConstraint?
     private var petFallbackLabel: NSTextField?
     private var taskScrollView: NSScrollView?
     private var taskStackView: NSStackView?
@@ -70,7 +72,11 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     )
     private var frameIndex = 0
     private var lastAnimationAdvanceAt: CFTimeInterval = 0
-    private var idleActivityDirector = PetIdleActivityDirector()
+    private let animationClock: () -> CFTimeInterval
+    private let systemReduceMotion: () -> Bool
+    private var idleActivityDirector: PetIdleActivityDirector
+    private var renderedIdleActivity: PetIdleActivityDirector.Activity = .wander
+    private var renderedIdleSegmentID = 0
     private var idleMotion = PetIdleActivityDirector.Motion(
         activity: .wander,
         x: 0,
@@ -104,6 +110,17 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private enum AnimationFrameLimit {
         static let completed = 7
         static let error = 7
+    }
+
+    init(
+        animationClock: @escaping () -> CFTimeInterval = CACurrentMediaTime,
+        systemReduceMotion: @escaping () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion },
+        idleActivityDirector: PetIdleActivityDirector = PetIdleActivityDirector()
+    ) {
+        self.animationClock = animationClock
+        self.systemReduceMotion = systemReduceMotion
+        self.idleActivityDirector = idleActivityDirector
+        super.init()
     }
 
     func start() {
@@ -187,6 +204,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             frameIndex = 0
             lastAnimationAdvanceAt = 0
             idleActivityDirector.reset()
+            renderedIdleActivity = .wander
+            renderedIdleSegmentID = 0
             idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1.08)
         }
         updateViews()
@@ -261,19 +280,23 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         statusView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(petView)
         container.addSubview(statusView)
+        let petWidth = petView.widthAnchor.constraint(
+            equalToConstant: PetActivityLayout.petWidth(wideIdle: usesWideIdlePlayfield)
+        )
+        petAreaWidthConstraint = petWidth
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 620),
-            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 520),
+            container.widthAnchor.constraint(equalToConstant: PetActivityLayout.contentWidth),
             container.heightAnchor.constraint(equalToConstant: 30),
             petView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             petView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            petView.widthAnchor.constraint(equalToConstant: 220),
+            petWidth,
             petView.heightAnchor.constraint(equalToConstant: 30),
-            statusView.leadingAnchor.constraint(equalTo: petView.trailingAnchor, constant: 8),
+            statusView.leadingAnchor.constraint(equalTo: petView.trailingAnchor, constant: PetActivityLayout.itemGap),
             statusView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             statusView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             statusView.heightAnchor.constraint(equalToConstant: 30)
         ])
+        taskScrollView?.isHidden = usesWideIdlePlayfield
         item.view = container
         return item
     }
@@ -295,10 +318,11 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
         container.addSubview(imageView)
         container.addSubview(fallback)
+        let imageCenterYConstraint = imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         NSLayoutConstraint.activate([
             imageView.widthAnchor.constraint(equalToConstant: 48),
             imageView.heightAnchor.constraint(equalToConstant: 30),
-            imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            imageCenterYConstraint,
             fallback.widthAnchor.constraint(equalToConstant: 48),
             fallback.heightAnchor.constraint(equalToConstant: 30),
             fallback.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -307,6 +331,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         let imageCenterConstraint = imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor)
         imageCenterConstraint.isActive = true
         petImageCenterXConstraint = imageCenterConstraint
+        petImageCenterYConstraint = imageCenterYConstraint
         petImageView = imageView
         petFallbackLabel = fallback
         petLabel = fallback
@@ -349,8 +374,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         container.addSubview(taskScroll)
         container.addSubview(connection)
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 392),
-            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 300),
             taskScroll.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 8),
             taskScroll.topAnchor.constraint(equalTo: container.topAnchor, constant: 1),
             taskScroll.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1),
@@ -424,26 +447,44 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     @objc private func advanceAnimation() {
-        let now = CACurrentMediaTime()
-        let interval = animationFrameInterval
-        let shouldAdvanceFrame = lastAnimationAdvanceAt == 0 || now - lastAnimationAdvanceAt >= interval
-        if shouldAdvanceFrame {
-            lastAnimationAdvanceAt = now
+        if current.state == .idle, current.activeCount == 0, current.waitingCount == 0 {
+            // Idle poses share the director's segment clock. This also replays
+            // a second jump correctly even if its activity enum is unchanged.
+            updatePetArtwork()
+            return
         }
-        if shouldAdvancePetAnimation {
-            if shouldAdvanceFrame {
-                if artwork.animationLoops(for: current.state),
-                   let frameCount = artwork.animationFrameCount(for: current.state) {
-                    frameIndex = (frameIndex + 1) % frameCount
+        let now = animationClock()
+        let interval = animationFrameInterval
+        if lastAnimationAdvanceAt == 0 {
+            lastAnimationAdvanceAt = now
+        } else if now - lastAnimationAdvanceAt >= interval, shouldAdvancePetAnimation {
+            let elapsed = now - lastAnimationAdvanceAt
+            let steps = max(1, min(Int(elapsed / interval), 3))
+            lastAnimationAdvanceAt += interval * Double(steps)
+            let idleActivity = current.state == .idle ? idleMotion.activity : nil
+            if let frameCount = artwork.animationFrameCount(
+                for: current.state,
+                activity: idleActivity,
+                direction: idleMotion.direction
+            ) {
+                if artwork.animationLoops(
+                    for: current.state,
+                    activity: idleActivity,
+                    direction: idleMotion.direction
+                ) {
+                    frameIndex = (frameIndex + steps) % frameCount
                 } else {
-                    frameIndex += 1
+                    frameIndex = min(frameIndex + steps, frameCount - 1)
                 }
+            } else {
+                frameIndex += steps
             }
         }
         updatePetArtwork()
     }
 
     private func updateViews() {
+        updatePlayfieldLayout()
         updatePetArtwork()
         if let trayButton { configureTrayButton(trayButton) }
         petLabel?.stringValue = face(for: current.state, expanded: true)
@@ -454,9 +495,20 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private func updatePetArtwork() {
-        let usesSpriteAnimation = artwork.hasAnimatedFrames(for: current.state)
+        updatePetActivityPosition()
+        let idleActivity = current.state == .idle ? idleMotion.activity : nil
+        let usesSpriteAnimation = artwork.hasAnimatedFrames(
+            for: current.state,
+            activity: idleActivity,
+            direction: idleMotion.direction
+        )
         let frame = effectiveMotion == .standard ? frameIndex : 0
-        let image = artwork.image(for: current.state, frameIndex: frame)
+        let image = artwork.image(
+            for: current.state,
+            activity: idleActivity,
+            direction: idleMotion.direction,
+            frameIndex: frame
+        )
         let animatedImage = image.map { usesSpriteAnimation ? $0 : animatedPetImage($0) }
         // Preserve the approved full-color fox. Only the compact button
         // background carries the semantic state color.
@@ -466,7 +518,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         petImageView?.image = animatedImage
         petImageView?.isHidden = image == nil
         petFallbackLabel?.isHidden = image != nil
-        updatePetActivityPosition()
     }
 
     private func configureTrayButton(_ button: NSButton) {
@@ -483,6 +534,9 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private var animationFrameInterval: CFTimeInterval {
+        if current.state == .idle {
+            return idleMotion.activity.frameInterval
+        }
         switch current.state {
         case .idle:
             return 0.24
@@ -504,17 +558,64 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
               current.waitingCount == 0,
               effectiveMotion == .standard else {
             idleActivityDirector.reset()
+            renderedIdleActivity = .wander
+            renderedIdleSegmentID = 0
             idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1.08)
             constraint.constant = 0
+            petImageCenterYConstraint?.constant = 0
             petImageView?.superview?.needsLayout = true
             return
         }
         idleMotion = idleActivityDirector.motion(
-            at: CACurrentMediaTime(),
-            travel: 76
+            at: animationClock(),
+            travel: PetActivityLayout.travel(wideIdle: usesWideIdlePlayfield)
         )
+        if idleMotion.segmentID != renderedIdleSegmentID {
+            if idleMotion.activity != renderedIdleActivity {
+                preparePetPoseCrossfade()
+            }
+            renderedIdleActivity = idleMotion.activity
+            renderedIdleSegmentID = idleMotion.segmentID
+            frameIndex = 0
+            lastAnimationAdvanceAt = 0
+        }
+        frameIndex = Int(idleMotion.elapsed / idleMotion.activity.frameInterval)
         constraint.constant = idleMotion.x
+        petImageCenterYConstraint?.constant = idleMotion.y
         petImageView?.superview?.needsLayout = true
+    }
+
+    private var usesWideIdlePlayfield: Bool {
+        current.state == .idle
+            && current.connectionState == .online
+            && current.activeCount == 0
+            && current.waitingCount == 0
+            && current.touchBarTasks.isEmpty
+    }
+
+    private func updatePlayfieldLayout() {
+        let wideIdle = usesWideIdlePlayfield
+        let width = PetActivityLayout.petWidth(wideIdle: wideIdle)
+        if let petAreaWidthConstraint, petAreaWidthConstraint.constant != width {
+            idleActivityDirector.reset()
+            renderedIdleActivity = .wander
+            renderedIdleSegmentID = 0
+            idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1)
+            frameIndex = 0
+            lastAnimationAdvanceAt = 0
+            petAreaWidthConstraint.constant = width
+        }
+        taskScrollView?.isHidden = wideIdle
+    }
+
+    private func preparePetPoseCrossfade() {
+        for view in [trayButton, petImageView].compactMap({ $0 }) {
+            view.wantsLayer = true
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.10
+            view.layer?.add(transition, forKey: "petPose")
+        }
     }
 
     private func animatedPetImage(_ image: NSImage) -> NSImage {
@@ -543,7 +644,12 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private var petMotion: PetMotion {
-        if artwork.hasAnimatedFrames(for: current.state) {
+        let idleActivity = current.state == .idle ? idleMotion.activity : nil
+        if artwork.hasAnimatedFrames(
+            for: current.state,
+            activity: idleActivity,
+            direction: idleMotion.direction
+        ) {
             return PetMotion(scale: 1, x: 0, y: 0, rotation: 0, opacity: 1)
         }
         guard effectiveMotion == .standard else {
@@ -637,14 +743,24 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
 
     private var effectiveMotion: EffectivePetMotion {
         settings.effectiveMotion(
-            systemReduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            systemReduceMotion: systemReduceMotion()
         )
     }
 
     private var shouldAdvancePetAnimation: Bool {
         guard effectiveMotion == .standard else { return false }
-        if let frameCount = artwork.animationFrameCount(for: current.state) {
-            return artwork.animationLoops(for: current.state) || frameIndex < frameCount - 1
+        let idleActivity = current.state == .idle ? idleMotion.activity : nil
+        if let frameCount = artwork.animationFrameCount(
+            for: current.state,
+            activity: idleActivity,
+            direction: idleMotion.direction
+        ) {
+            return artwork.animationLoops(
+                for: current.state,
+                activity: idleActivity,
+                direction: idleMotion.direction
+            )
+                || frameIndex < frameCount - 1
         }
         switch current.state {
         case .waitingApproval, .waitingInput:

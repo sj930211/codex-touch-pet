@@ -9,8 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings = AppSettings()
 
     private var statusItem: NSStatusItem?
-    private var statusMenuItem: NSMenuItem?
-    private var quietMenuItem: NSMenuItem?
+    private var menuController: PetMenuController?
+    private let normalStatusImage = MenuBarIcon.image()
+    private let attentionStatusImage = MenuBarIcon.image(attention: true)
     private var settingsWindowController: SettingsWindowController?
     private var diagnosticsWindowController: DiagnosticsWindowController?
     private var signalSources: [DispatchSourceSignal] = []
@@ -65,93 +66,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureMenuBar() {
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = statusImage(symbolName: "pawprint.fill")
+        statusItem.button?.image = normalStatusImage
         statusItem.button?.toolTip = "Codex Touch Pet"
-
-        let menu = NSMenu()
-        let statusMenuItem = NSMenuItem(title: "状态：连接中", action: nil, keyEquivalent: "")
-        statusMenuItem.isEnabled = false
-        menu.addItem(statusMenuItem)
-
-        let settingsItem = NSMenuItem(
-            title: "设置…",
-            action: #selector(showSettings),
-            keyEquivalent: ","
-        )
-        settingsItem.target = self
-        menu.addItem(settingsItem)
-
-        let reconnectItem = NSMenuItem(
-            title: "重新连接 Codex",
-            action: #selector(reconnectIPC),
-            keyEquivalent: ""
-        )
-        reconnectItem.target = self
-        menu.addItem(reconnectItem)
-
-        let diagnosticsItem = NSMenuItem(
-            title: "诊断信息…",
-            action: #selector(showDiagnostics),
-            keyEquivalent: ""
-        )
-        diagnosticsItem.target = self
-        menu.addItem(diagnosticsItem)
-
-        let usageItem = NSMenuItem(
-            title: "使用说明",
-            action: #selector(showUsage),
-            keyEquivalent: ""
-        )
-        usageItem.target = self
-        menu.addItem(usageItem)
-
-        let aboutItem = NSMenuItem(
-            title: "关于 Codex Touch Pet",
-            action: #selector(showAbout),
-            keyEquivalent: ""
-        )
-        aboutItem.target = self
-        menu.addItem(aboutItem)
-
-        let versionItem = NSMenuItem(title: "版本 \(AppMetadata.version)（\(AppMetadata.build)）", action: nil, keyEquivalent: "")
-        versionItem.isEnabled = false
-        menu.addItem(versionItem)
-        menu.addItem(.separator())
-
-        let showItem = NSMenuItem(
-            title: "在 Touch Bar 展开",
-            action: #selector(showTouchBar),
-            keyEquivalent: ""
-        )
-        showItem.target = self
-        showItem.isEnabled = touchBarController.isPrivateTouchBarAvailable
-        menu.addItem(showItem)
-
-        let quietItem = NSMenuItem(
-            title: "安静模式",
-            action: #selector(toggleQuietMode),
-            keyEquivalent: ""
-        )
-        quietItem.target = self
-        quietItem.state = settings.quietMode ? .on : .off
-        menu.addItem(quietItem)
-
-        let compatibilityTitle = touchBarController.isPrivateTouchBarAvailable
-            ? "Touch Bar：兼容"
-            : "Touch Bar：不可用，已降级为菜单栏"
-        let compatibilityItem = NSMenuItem(title: compatibilityTitle, action: nil, keyEquivalent: "")
-        compatibilityItem.isEnabled = false
-        menu.addItem(compatibilityItem)
-
-        menu.addItem(.separator())
-        let quitItem = NSMenuItem(title: "退出 Codex Touch Pet", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-
-        statusItem.menu = menu
+        let menuController = PetMenuController(touchBarAvailable: touchBarController.isPrivateTouchBarAvailable) { [weak self] action in
+            self?.handleMenuAction(action)
+        }
+        menuController.update(status: latestAggregate, settings: settings)
+        statusItem.menu = menuController.menu
         self.statusItem = statusItem
-        self.statusMenuItem = statusMenuItem
-        self.quietMenuItem = quietItem
+        self.menuController = menuController
     }
 
     private func configureSignals() {
@@ -238,39 +161,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         precondition(Thread.isMainThread)
         latestAggregate = aggregate
         touchBarController.update(aggregate)
-        statusMenuItem?.title = "状态：\(menuStatusLabel(for: aggregate))"
-        statusItem?.button?.image = statusImage(symbolName: menuBarSymbolName(for: aggregate.state))
-        statusItem?.button?.contentTintColor = aggregate.connectionState == .online
-            ? aggregate.state.color
-            : aggregate.connectionState.color
+        updateMenuPresentation()
         diagnosticsWindowController?.update(snapshot: diagnosticSnapshot())
     }
 
-    private func menuStatusLabel(for aggregate: AggregatePetStatus) -> String {
-        switch aggregate.connectionState {
-        case .online:
-            return aggregate.state.label
-        case .reconnecting where aggregate.activeCount > 0:
-            return "\(aggregate.state.label) · 正在重连"
-        default:
-            return aggregate.connectionState.diagnosticLabel
-        }
+    private func updateMenuPresentation() {
+        let summary = MenuBarSummary(status: latestAggregate, quietMode: settings.quietMode)
+        menuController?.update(status: latestAggregate, settings: settings)
+        statusItem?.button?.image = summary.needsAttention ? attentionStatusImage : normalStatusImage
+        statusItem?.button?.contentTintColor = nil
+        statusItem?.button?.toolTip = "\(AppMetadata.name) · \(summary.title) · \(summary.detail)"
+        statusItem?.button?.setAccessibilityLabel("\(AppMetadata.name)，\(summary.title)，\(summary.detail)")
     }
 
-    private func menuBarSymbolName(for state: PetState) -> String {
-        switch state {
-        case .waitingApproval, .waitingInput: return "exclamationmark.bubble.fill"
-        case .failed, .systemError: return "exclamationmark.triangle.fill"
-        case .completed: return "checkmark.circle.fill"
-        case .working: return "pawprint.fill"
-        default: return "pawprint"
+    private func handleMenuAction(_ action: PetMenuAction) {
+        switch action {
+        case .expand: showTouchBar()
+        case .quiet: toggleQuietMode()
+        case .settings: showSettings()
+        case .reconnect: reconnectIPC()
+        case .diagnostics: showDiagnostics()
+        case .usage: showUsage()
+        case .about: showAbout()
+        case .quit: quit()
         }
-    }
-
-    private func statusImage(symbolName: String) -> NSImage? {
-        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Codex Touch Pet")
-        image?.isTemplate = true
-        return image
     }
 
     @objc private func showTouchBar() {
@@ -280,7 +194,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showSettings() {
         if settingsWindowController == nil {
             settingsWindowController = SettingsWindowController(
-                settings: settings
+                settings: settings,
+                onHelpAction: { [weak self] action in self?.handleMenuAction(action) }
             ) { [weak self] newSettings in
                 self?.applySettings(newSettings)
             }
@@ -309,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func showUsage() {
         let alert = NSAlert()
         alert.messageText = "Codex Touch Pet 使用说明"
-        alert.informativeText = "Touch Bar 只显示汇总：狐狸表示当前状态。只有一项运行任务时，右侧显示任务缩略名和运行时间；多任务时只显示数量和最长运行时间。具体任务详情仍回到 Codex 查看。\n\n菜单栏可配置自动展开、紧凑宠物、安静模式、动效强度和完成/等待提示。"
+        alert.informativeText = "狐狸的姿态表示任务状态，右侧独立显示连接状态。任务胶囊并排展示，可横向滑动；点按胶囊会回到对应的 Codex 会话。审批、回复和具体工作内容仍在 Codex 中完成。\n\n没有任务胶囊且连接在线时，狐狸会在空闲区域活动。菜单栏设置可调整自动展开、紧凑宠物、安静模式、动效和完成/等待提示。"
         alert.addButton(withTitle: "完成")
         alert.runModal()
     }
@@ -335,7 +250,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settings = newSettings
         settingsStore.save(newSettings)
         touchBarController.applySettings(newSettings)
-        quietMenuItem?.state = newSettings.quietMode ? .on : .off
+        updateMenuPresentation()
         settingsWindowController?.update(settings: newSettings)
     }
 

@@ -2,6 +2,12 @@
 
 Codex 状态宠物在实体 MacBook Touch Bar 上的可行性验证。
 
+## v0.4.1 发布
+
+本版重点修复长连接消息的临时对象累积和动画重复布局开销，保留原有动效节奏，并包含受限的软件图标互动原型。更新内容、安装要求和未完成验收见 [发布说明](docs/releases/v0.4.1.md)。
+
+发布包为 **Apple Silicon（arm64）/ macOS 13 及以上**，完整宠物界面需要实体 Touch Bar；不包含 Intel 或 universal 构建。下载 ZIP 后将 `Codex Touch Pet.app` 拖入“应用程序”。包采用 ad-hoc 签名，未经过 Developer ID 签名或 Apple 公证，首次启动可能需要在系统设置中允许打开。
+
 ## 当前状态
 
 - Touch Bar 真机展示：已通过。
@@ -20,6 +26,7 @@ Codex 状态宠物在实体 MacBook Touch Bar 上的可行性验证。
 - 完整 Touch Bar 使用单一组合布局，宠物承担任务状态表达，任务胶囊和右侧连接状态同时可见。
 - 空闲时狐狸从本地情境预制动作中选择低频活动，不调用在线模型或天气/位置服务。
 - 空闲时自动随机播放跨区探索、边缘折返、跑后连跳、跑动玩尾巴四套活动；无任务胶囊时使用 528pt 活动区，姿态帧与运动时间同步。收到工作或等待事件会立即中断。
+- 软件图标互动受限原型：实时调用期间显示最多三个道具，狐狸依次走近并轻推；同软件多调用合并，结束/失败/取消、等待、断线或 300 秒失效后清理。未确认的目标使用通用浏览器/电脑/工具图标，不猜软件。
 - 产品设计：见 `PRODUCT_DESIGN.md`。
 
 ## 界面预览
@@ -34,7 +41,7 @@ Codex 状态宠物在实体 MacBook Touch Bar 上的可行性验证。
 |---|---|
 | ![Codex Touch Pet 设置](docs/screenshots/settings.png) | ![Codex Touch Pet 诊断](docs/screenshots/diagnostics.png) |
 
-Touch Bar 本体无法通过 macOS 屏幕截图 API 捕获，真机效果需使用实体设备拍摄。
+支持的设备上可使用 `screencapture -b -x touchbar.png` 捕获 Touch Bar 静态画面。静态截图和离屏预览都不能替代实体设备上的动画连贯性、触摸操作及长期运行验收。
 
 ## 构建与运行
 
@@ -68,6 +75,14 @@ make package
 - Touch Bar 左侧提供更宽的宠物活动区，中间是可横向滑动的任务胶囊，右侧固定显示连接状态；不再重复显示“工作中”等主状态文字。
 - `make test-idle` 验证真实 AppKit 空闲/任务布局和控制器计时播放（动作重播、休眠恢复、任务中断、静态/减少动态/安静模式），并在 `.build/idle-preview/` 输出四套动作的离线预览帧；这些预览不是实体 Touch Bar 截图。
 - `make test-interface` 验证菜单动作、设置变更回调、安静模式恢复、外部偏好同步及浅色/深色/最小尺寸布局。`design-test/menu-settings-v1/` 输出原生视图离屏渲染，不能替代系统菜单点击和键盘验收。
+- `make test-tools` 验证工具元数据隔离、调用生命周期、数组索引变化、过期与内存边界，以及道具/任务胶囊布局和动效；`.build/tool-props-preview/` 是合成事件驱动的原生离屏帧，不是真机截图或真实多软件并行操作证明。
+- `make test-ipc-memory` 经隔离的本地 socket 驱动正式 IPC 客户端，验证 4,000 条合成消息的物理内存增长预算，以及解析错误、手动重连和停止；编译后可运行 `.build/direct/pet-ipc-memory-tests --stress` 增至 12,000 条。不访问真实会话或数据库，需要允许创建本地 Unix socket；短时回归不替代实际 App 多小时观察。
+
+### 软件图标映射边界
+
+默认不会把 `chrome-devtools` 或 `playwright` 的名字当作确定的本机软件；通用 `cua_repl/js` 也不能精确识别任意目标 App。命令执行不代表正在操作 Terminal。原型不读取脚本、工具参数或返回正文来推断目标，不下载图标。
+
+高级本地注册可通过本应用偏好域 `dev.codex.touch-pet` 中的字典 `toolServerApplications`（server → Bundle ID）或 `toolConnectorApplications`（结构化 connectorId → Bundle ID）提供。只应登记已核实的绑定，改变 MCP 连接目标时须同步删除旧绑定；应用重启后生效。图标由系统读取，未安装时显示通用软件。此注册由用户维护，不等于工具实时提供了目标身份。当前设置窗口不增加映射编辑器。
 - 任务胶囊通过背景色、细边框和任务简称表达状态；完整状态可通过悬停提示查看，不另加状态按钮或图标。
 - Codex 当前选中会话尚无稳定的外部状态源，因此暂不显示“当前任务”高亮，也不用最近更新时间伪判断。
 

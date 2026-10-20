@@ -394,6 +394,7 @@ struct AggregatePetStatus: Equatable {
     var waitingCount: Int
     var trackedCount: Int
     var tasks: [PetTaskStatus] = []
+    var toolProps: [ToolProp] = []
 
     var countLabel: String {
         if waitingCount > 0 && activeCount > 0 {

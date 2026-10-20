@@ -193,6 +193,7 @@ private final class UnixFramedSocket {
 
 final class CodexIPCClient {
     private let socket = UnixFramedSocket()
+    private let socketPath: String
     private let statusStore: ThreadStatusStore
     private let threadProvider = RecentThreadProvider()
     private let worker = DispatchQueue(label: "dev.codex.touch-pet.ipc", qos: .userInitiated)
@@ -208,8 +209,10 @@ final class CodexIPCClient {
     private var sessionGeneration = UUID()
     private var protocolRetryBlocked = false
 
-    init(statusStore: ThreadStatusStore) {
+    init(statusStore: ThreadStatusStore, socketPath: String? = nil) {
         self.statusStore = statusStore
+        self.socketPath = socketPath ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/ipc/ipc.sock").path
     }
 
     func start() {
@@ -263,17 +266,18 @@ final class CodexIPCClient {
     }
 
     private func connectionLoop() {
-        let socketPath = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/ipc/ipc.sock").path
-
         while shouldRun {
             do {
                 try socket.connect(path: socketPath)
                 resetSessionState()
                 try sendInitialize()
                 while shouldRun && socket.isConnected {
-                    let message = try socket.receive()
-                    handle(message)
+                    // This worker stays alive across connections. Drain temporary
+                    // Foundation objects after handling each message, not at exit.
+                    try autoreleasepool {
+                        let message = try socket.receive()
+                        handle(message)
+                    }
                 }
             } catch {
                 socket.close()
@@ -527,6 +531,10 @@ final class CodexIPCClient {
     }
 
     private func applySnapshot(_ state: [String: Any], threadId: String, generation: UUID) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isCurrentSession(generation) else { return }
+            self.statusStore.resetToolSnapshot(threadId: threadId)
+        }
         if let runtime = state["threadRuntimeStatus"] as? [String: Any],
            let type = runtime["type"] as? String {
             let flags = runtime["activeFlags"] as? [String] ?? []
@@ -542,6 +550,12 @@ final class CodexIPCClient {
 
     private func applyPatches(_ patches: [[String: Any]], threadId: String, generation: UUID) {
         for patch in patches {
+            if let metadata = ToolCallTracker.metadataPatch(patch) {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.isCurrentSession(generation) else { return }
+                    self.statusStore.applyToolPatch(metadata, threadId: threadId)
+                }
+            }
             let path = patch["path"] as? [Any] ?? []
             let pathStrings = path.map(String.init(describing:))
             let value = patch["value"]

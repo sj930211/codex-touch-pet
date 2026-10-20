@@ -88,6 +88,30 @@ func sameFrame(_ actual: NSImage?, _ expected: NSImage?) -> Bool {
     return actual.tiffRepresentation == expected.tiffRepresentation
 }
 var oracle = PetIdleActivityDirector(seed: 0xC0D3_5EED)
+// C1/C2: real controller, same clock and pose. An unchanged 30Hz tick
+// must not reassign the NSImage or invalidate the parent layout.
+playback.update(runningStatusForRefresh())
+tickPlayback()
+var redundantImageWrites = 0
+let imageObservation = playbackImage.observe(\.image, options: [.new]) { _, _ in
+    redundantImageWrites += 1
+}
+var redundantLayouts = 0
+for _ in 0..<120 {
+    _ = playback.perform(NSSelectorFromString("advanceAnimation"))
+    if playbackPet.needsLayout { redundantLayouts += 1 }
+    playbackView.layoutSubtreeIfNeeded()
+}
+imageObservation.invalidate()
+print("PET_REFRESH_METRICS (same-pose imageWrites=\(redundantImageWrites), parentLayouts=\(redundantLayouts))")
+expect(redundantImageWrites == 0 && redundantLayouts == 0, "Unchanged ticks must not repeat image setters or request parent layout")
+playback.update(idleStatus)
+tickPlayback()
+let fixedLayoutConstants = playbackPet.constraints.map(\.constant)
+
+func runningStatusForRefresh() -> AggregatePetStatus {
+    AggregatePetStatus(state: .working(nil), connectionState: .online, activeCount: 1, waitingCount: 0, trackedCount: 1)
+}
 var previousSegmentID = -1
 var replayedJumps = 0
 var sleepOffset: TimeInterval = 0
@@ -97,10 +121,12 @@ for sample in 0...7_200 {
         playbackTime = 100 + Double(sample) / 30 + sleepOffset
         let expected = oracle.motion(at: playbackTime, travel: PetActivityLayout.travel(wideIdle: true), date: now)
         tickPlayback()
+        expect(playbackPet.constraints.map(\.constant) == fixedLayoutConstants, "Continuous travel must not mutate playfield Auto Layout constraints")
+        expect(playbackImage.frame.size == NSSize(width: 48, height: 30), "Source frame dimensions must not resize the actual Touch Bar sprite")
         let actualX = playbackImage.frame.midX - playbackPet.bounds.midX
         // Windowless AppKit layout snaps to whole backing pixels (1x here).
         expect(abs(actualX - expected.x) <= 0.51, "Actual controller timer must follow the production idle trajectory within backing-pixel rounding (sample=\(sample), actual=\(actualX), expected=\(expected.x), activity=\(expected.activity))")
-        expect(playbackImage.frame.minX >= 0 && playbackImage.frame.maxX <= playbackPet.bounds.width, "Actual image must remain entirely inside its activity area")
+        expect(playbackImage.frame.minX >= 0 && playbackImage.frame.maxX <= playbackPet.bounds.width, "Actual image must remain entirely inside its activity area (sample=\(sample), frame=\(playbackImage.frame), bounds=\(playbackPet.bounds), expectedX=\(expected.x))")
         let expectedFrame = Int(expected.elapsed / expected.activity.frameInterval)
         expect(
             sameFrame(

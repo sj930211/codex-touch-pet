@@ -19,10 +19,13 @@ final class ThreadStatusStore {
     private var filteredInternalCount: Int?
     private var staleGeneration: UUID?
     private var initialScanComplete = false
+    private var toolCalls: ToolCallTracker
+    private var toolExpiryGeneration: UUID?
 
     init(
         now: @escaping () -> Date = Date.init,
         reconnectGracePeriod: TimeInterval = 8,
+        toolRegistry: ToolApplicationRegistry = .local(),
         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, action in
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: action)
         }
@@ -30,6 +33,7 @@ final class ThreadStatusStore {
         self.now = now
         self.reconnectGracePeriod = reconnectGracePeriod
         self.schedule = schedule
+        self.toolCalls = ToolCallTracker(registry: toolRegistry)
     }
 
     func setConnected(_ value: Bool) {
@@ -51,6 +55,7 @@ final class ThreadStatusStore {
 
     func markConnected() {
         dispatchPrecondition(condition: .onQueue(.main))
+        if connectionState != .online { toolCalls.reset() }
         staleGeneration = nil
         connectionState = .online
         connectionIssueCode = nil
@@ -60,6 +65,8 @@ final class ThreadStatusStore {
 
     func markDisconnected(issueCode: String) {
         dispatchPrecondition(condition: .onQueue(.main))
+        toolCalls.endAll()
+        toolExpiryGeneration = nil
         guard connectionState != .incompatible else { return }
         connectionIssueCode = issueCode
         if lastSuccessfulUpdateAt == nil {
@@ -88,6 +95,8 @@ final class ThreadStatusStore {
 
     func beginManualReconnect() {
         dispatchPrecondition(condition: .onQueue(.main))
+        toolCalls.endAll()
+        toolExpiryGeneration = nil
         if connectionState == .online {
             markDisconnected(issueCode: "manual_reconnect")
             return
@@ -103,6 +112,8 @@ final class ThreadStatusStore {
 
     func markIncompatible(issueCode: String) {
         dispatchPrecondition(condition: .onQueue(.main))
+        toolCalls.endAll()
+        toolExpiryGeneration = nil
         staleGeneration = nil
         connectionState = .incompatible
         connectionIssueCode = issueCode
@@ -131,7 +142,38 @@ final class ThreadStatusStore {
         lastTurnStatus.removeValue(forKey: threadId)
         transientGeneration.removeValue(forKey: threadId)
         activityGeneration.removeValue(forKey: threadId)
+        toolCalls.end(thread: threadId)
         publish()
+    }
+
+    func applyToolPatch(_ patch: [String: Any], threadId: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard connectionState == .online, case .working = statuses[threadId]?.state else { return }
+        toolCalls.expire(at: now())
+        toolCalls.apply(patch: patch, thread: threadId, at: now())
+        publish()
+        scheduleToolExpiryIfNeeded()
+    }
+
+    func resetToolSnapshot(threadId: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        // A snapshot is history, never a fresh tool start. End old interactions
+        // on replacement without retaining any snapshot body.
+        toolCalls.end(thread: threadId)
+        publish()
+    }
+
+    private func scheduleToolExpiryIfNeeded() {
+        guard toolExpiryGeneration == nil, let deadline = toolCalls.nextExpiry else { return }
+        let generation = UUID()
+        toolExpiryGeneration = generation
+        schedule(max(0.01, deadline.timeIntervalSince(now()))) { [weak self] in
+            guard let self, self.toolExpiryGeneration == generation else { return }
+            self.toolExpiryGeneration = nil
+            self.toolCalls.expire(at: self.now())
+            self.publish()
+            self.scheduleToolExpiryIfNeeded()
+        }
     }
 
     func updateTitle(threadId: String, title: String) {
@@ -172,13 +214,16 @@ final class ThreadStatusStore {
             beginTurnIfNeeded(threadId: threadId)
             lastTurnStatus[threadId] = "inProgress"
             if activeFlags.contains("waitingOnApproval") {
+                toolCalls.end(thread: threadId)
                 state = .waitingApproval
             } else if activeFlags.contains("waitingOnUserInput") {
+                toolCalls.end(thread: threadId)
                 state = .waitingInput
             } else {
                 state = .working(nil)
             }
         default:
+            toolCalls.end(thread: threadId)
             state = .connecting
         }
         setState(state, threadId: threadId)
@@ -274,6 +319,7 @@ final class ThreadStatusStore {
 
     private func endTurn(threadId: String) {
         turnStartedAt.removeValue(forKey: threadId)
+        toolCalls.end(thread: threadId)
     }
 
     private func recordSuccessfulUpdate() {
@@ -286,7 +332,7 @@ final class ThreadStatusStore {
     }
 
     private func publish() {
-        let value = PetStatusAggregator.aggregate(
+        var value = PetStatusAggregator.aggregate(
             Array(statuses.values),
             connectionState: connectionState,
             lastSuccessfulUpdateAt: lastSuccessfulUpdateAt,
@@ -295,6 +341,7 @@ final class ThreadStatusStore {
             filteredInternalCount: filteredInternalCount,
             initialScanComplete: initialScanComplete
         )
+        value.toolProps = connectionState == .online ? toolCalls.props() : []
         onChange?(value)
     }
 }

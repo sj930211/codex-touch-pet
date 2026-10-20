@@ -35,6 +35,40 @@ private final class TaskChipButton: NSButton {
     }
 }
 
+/// Auto Layout sizes the playfield, not each animation step. A layer-backed
+/// sprite can move locally without invalidating the entire Touch Bar layout.
+private final class PetSpriteImageView: NSImageView {
+    // Source frames are 192x208; their intrinsic size must not resize the
+    // manually laid-out 48x30 Touch Bar sprite when the image changes.
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+}
+
+private final class PetPlayfieldView: NSView {
+    let imageView = PetSpriteImageView(frame: NSRect(x: 0, y: 0, width: 48, height: 30))
+    private var spriteOffset = NSPoint.zero
+
+    func moveSprite(to offset: NSPoint) {
+        guard spriteOffset != offset else { return }
+        spriteOffset = offset
+        positionSprite()
+    }
+
+    override func layout() {
+        super.layout()
+        positionSprite()
+    }
+
+    private func positionSprite() {
+        let origin = NSPoint(
+            x: bounds.midX + spriteOffset.x - imageView.frame.width / 2,
+            y: bounds.midY + spriteOffset.y - imageView.frame.height / 2
+        )
+        if imageView.frame.origin != origin { imageView.setFrameOrigin(origin) }
+    }
+}
+
 final class TouchBarController: NSObject, NSTouchBarDelegate {
     private enum Identifier {
         static let tray = NSTouchBarItem.Identifier("dev.codex.touch-pet.tray")
@@ -49,9 +83,12 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private var trayButton: NSButton?
     private var petLabel: NSTextField?
     private var petImageView: NSImageView?
-    private var petImageCenterXConstraint: NSLayoutConstraint?
-    private var petImageCenterYConstraint: NSLayoutConstraint?
+    private var petPlayfield: PetPlayfieldView?
     private var petAreaWidthConstraint: NSLayoutConstraint?
+    private var toolPropScene: ToolPropSceneView?
+    private var toolSceneProps: [ToolPropIdentity] = []
+    private var toolSceneElapsed: TimeInterval = 0
+    private var toolSceneLastTick: TimeInterval?
     private var petFallbackLabel: NSTextField?
     private var taskScrollView: NSScrollView?
     private var taskStackView: NSStackView?
@@ -87,13 +124,15 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     private var isExpanded = false
     private(set) var codexIsActive = false
 
-    private struct PetMotion {
+    private struct PetMotion: Equatable {
         let scale: CGFloat
         let x: CGFloat
         let y: CGFloat
         let rotation: CGFloat
         let opacity: CGFloat
     }
+
+    private var fallbackArtwork: (source: NSImage, motion: PetMotion, image: NSImage)?
 
     private struct TaskChipSnapshot: Equatable {
         let threadID: String
@@ -302,12 +341,17 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private func makeExpandedPetView() -> NSView {
-        let container = NSView()
-        let imageView = NSImageView()
+        let container = PetPlayfieldView()
+        let scene = ToolPropSceneView()
+        scene.translatesAutoresizingMaskIntoConstraints = false
+        let imageView = container.imageView
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.imageAlignment = .alignCenter
         imageView.toolTip = "Codex Touch Bar Pet"
+        // This subview is laid out manually by PetPlayfieldView. Do not turn
+        // its changing frame back into autoresizing-mask constraints.
         imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.wantsLayer = true
 
         let fallback = NSTextField(labelWithString: face(for: current.state, expanded: true))
         fallback.alignment = .center
@@ -316,25 +360,26 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         fallback.toolTip = "Codex Touch Bar Pet"
         fallback.translatesAutoresizingMaskIntoConstraints = false
 
+        // The fox crosses parked props when walking between targets. Keep
+        // its face in front throughout those transitions.
+        container.addSubview(scene)
         container.addSubview(imageView)
         container.addSubview(fallback)
-        let imageCenterYConstraint = imageView.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         NSLayoutConstraint.activate([
-            imageView.widthAnchor.constraint(equalToConstant: 48),
-            imageView.heightAnchor.constraint(equalToConstant: 30),
-            imageCenterYConstraint,
+            scene.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scene.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scene.topAnchor.constraint(equalTo: container.topAnchor),
+            scene.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             fallback.widthAnchor.constraint(equalToConstant: 48),
             fallback.heightAnchor.constraint(equalToConstant: 30),
             fallback.centerXAnchor.constraint(equalTo: container.centerXAnchor),
             fallback.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
-        let imageCenterConstraint = imageView.centerXAnchor.constraint(equalTo: container.centerXAnchor)
-        imageCenterConstraint.isActive = true
-        petImageCenterXConstraint = imageCenterConstraint
-        petImageCenterYConstraint = imageCenterYConstraint
+        petPlayfield = container
         petImageView = imageView
         petFallbackLabel = fallback
         petLabel = fallback
+        toolPropScene = scene
         return container
     }
 
@@ -495,7 +540,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
     }
 
     private func updatePetArtwork() {
-        updatePetActivityPosition()
+        updateIdleMotion()
         let idleActivity = current.state == .idle ? idleMotion.activity : nil
         let usesSpriteAnimation = artwork.hasAnimatedFrames(
             for: current.state,
@@ -509,15 +554,60 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             direction: idleMotion.direction,
             frameIndex: frame
         )
-        let animatedImage = image.map { usesSpriteAnimation ? $0 : animatedPetImage($0) }
+        let animatedImage = image.map { usesSpriteAnimation ? $0 : fallbackPetImage($0) }
+        let toolScene = updateToolScene()
+        petPlayfield?.moveSprite(to: toolScene.position ?? NSPoint(x: idleMotion.x, y: idleMotion.y))
         // Preserve the approved full-color fox. Only the compact button
         // background carries the semantic state color.
-        trayButton?.image = animatedImage
-        trayButton?.title = image == nil ? face(for: current.state) : ""
-        trayButton?.imagePosition = image == nil ? .noImage : .imageOnly
-        petImageView?.image = animatedImage
-        petImageView?.isHidden = image == nil
-        petFallbackLabel?.isHidden = image != nil
+        if let trayButton {
+            if trayButton.image !== animatedImage { trayButton.image = animatedImage }
+            let title = image == nil ? face(for: current.state) : ""
+            if trayButton.title != title { trayButton.title = title }
+            let position: NSControl.ImagePosition = image == nil ? .noImage : .imageOnly
+            if trayButton.imagePosition != position { trayButton.imagePosition = position }
+        }
+        if let petImageView {
+            let pose = toolScene.pose ?? animatedImage
+            if petImageView.image !== pose { petImageView.image = pose }
+            if petImageView.isHidden != (image == nil) { petImageView.isHidden = image == nil }
+        }
+        if let petFallbackLabel, petFallbackLabel.isHidden != (image != nil) {
+            petFallbackLabel.isHidden = image != nil
+        }
+    }
+
+    private func updateToolScene() -> (pose: NSImage?, position: NSPoint?) {
+        let props: [ToolProp]
+        if current.activeCount > 0, current.connectionState == .online { props = current.toolProps }
+        else { props = [] }
+        let identities = props.map(\.identity)
+        let now = animationClock()
+        if identities != toolSceneProps {
+            toolSceneProps = identities
+            toolSceneElapsed = 0
+            toolSceneLastTick = now
+        }
+        let working: Bool
+        if case .working = current.state { working = true } else { working = false }
+        let animated = effectiveMotion == .standard && working
+        if let previous = toolSceneLastTick, animated {
+            toolSceneElapsed += max(0, min(0.1, now - previous))
+        }
+        toolSceneLastTick = now
+        toolPropScene?.update(props: props, elapsed: toolSceneElapsed, animated: animated)
+        guard !props.isEmpty else { return (nil, nil) }
+        // A waiting sibling has visual priority, but must not hide software
+        // still in use by another thread. Keep those props parked and retain
+        // the waiting fox instead of borrowing a working/play pose.
+        guard working else {
+            return (nil, NSPoint(x: ToolPropChoreography.foxX - PetActivityLayout.normalPetWidth / 2, y: 0))
+        }
+        let sample = ToolPropChoreography.sample(elapsed: toolSceneElapsed, count: props.count, animated: animated)
+        // The compact button retains the working fox. Only the expanded
+        // scene borrows the approved ground-walk and paw/tail-play poses.
+        let pose = artwork.image(for: .idle, activity: sample.walking ? .run : .play,
+            direction: sample.direction, frameIndex: sample.foxFrame)
+        return (pose, NSPoint(x: sample.foxX - PetActivityLayout.normalPetWidth / 2, y: 0))
     }
 
     private func configureTrayButton(_ button: NSButton) {
@@ -551,8 +641,8 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         }
     }
 
-    private func updatePetActivityPosition() {
-        guard let constraint = petImageCenterXConstraint else { return }
+    private func updateIdleMotion() {
+        guard petPlayfield != nil else { return }
         guard current.state == .idle,
               current.activeCount == 0,
               current.waitingCount == 0,
@@ -561,9 +651,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             renderedIdleActivity = .wander
             renderedIdleSegmentID = 0
             idleMotion = PetIdleActivityDirector.Motion(activity: .wander, x: 0, y: 0, rotation: 0, scale: 1.08)
-            constraint.constant = 0
-            petImageCenterYConstraint?.constant = 0
-            petImageView?.superview?.needsLayout = true
             return
         }
         idleMotion = idleActivityDirector.motion(
@@ -580,9 +667,6 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
             lastAnimationAdvanceAt = 0
         }
         frameIndex = Int(idleMotion.elapsed / idleMotion.activity.frameInterval)
-        constraint.constant = idleMotion.x
-        petImageCenterYConstraint?.constant = idleMotion.y
-        petImageView?.superview?.needsLayout = true
     }
 
     private var usesWideIdlePlayfield: Bool {
@@ -618,8 +702,11 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         }
     }
 
-    private func animatedPetImage(_ image: NSImage) -> NSImage {
+    private func fallbackPetImage(_ image: NSImage) -> NSImage {
         let motion = petMotion
+        if let fallbackArtwork, fallbackArtwork.source === image, fallbackArtwork.motion == motion {
+            return fallbackArtwork.image
+        }
         let canvas = NSImage(size: image.size)
         canvas.lockFocus()
 
@@ -640,6 +727,7 @@ final class TouchBarController: NSObject, NSTouchBarDelegate {
         )
         canvas.unlockFocus()
         canvas.isTemplate = false
+        fallbackArtwork = (image, motion, canvas)
         return canvas
     }
 
